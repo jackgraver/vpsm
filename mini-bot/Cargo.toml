@@ -4,3 +4,19 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# The only dependency, and deliberately so: everything mini-bot samples comes
+# out of /proc, which is just text file reads from std. The one exception is
+# filesystem capacity (how full a disk is) — there is no /proc file for it, it
+# needs the statvfs(3) syscall, and libc is the thinnest way to reach it. libc
+# has no transitive dependencies and contributes no codegen beyond the FFI
+# declarations we actually call.
+libc = { version = "0.2", default-features = false, features = ["std"] }
+
+[profile.release]
+# This runs continuously next to the workloads it watches, so favour a small
+# resident binary over compile speed.
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
