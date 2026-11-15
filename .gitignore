@@ -1,0 +1,6 @@
+# mini-bot (Rust)
+/mini-bot/target
+
+# collector (Go)
+/collector/collector
+/collector/vpsm-collector
