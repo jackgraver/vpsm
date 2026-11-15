@@ -106,3 +106,11 @@ Go 1.25, module `vpsm-collector`. One direct dependency
 (`modernc.org/sqlite`); everything else is stdlib, and worth keeping that
 way. `go test ./...` covers storage, protocol validation, the API, the
 client/storage contract, and the renderers.
+
+`Dockerfile` builds the server as a container image — `CGO_ENABLED=0`, which
+the pure-Go SQLite driver is what makes possible. `../e2e` uses it to run the
+collector against agents on a container network, and `../e2e/check.sh`
+asserts over real HTTP the things unit tests can only assert in process:
+which code comes back on each rejection, that a retried flush counts as a
+duplicate, and that a `null` is still a `null` after JSON, SQLite and the
+renderer have each had a turn at it.

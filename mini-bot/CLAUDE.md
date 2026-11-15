@@ -232,3 +232,21 @@ While developing this side, run the other half locally with
 `vpsm-collector host <id>` to see exactly what landed. Anything the
 collector cannot derive renders as `—` rather than zero, so a field that is
 not wired up yet is visibly absent rather than silently wrong.
+
+`../e2e` is the same loop with the collector in a container and the agent
+talking to it over a network, which is the arrangement a deployed agent
+actually faces. Two things there are worth having before writing the
+serialiser rather than after:
+
+- `e2e/agent-sim/gen-report.sh` emits a report this collector accepts, with
+  the reasoning for each field inline. It is the reference to diff the
+  serialiser's output against — including the mixed-batch shape, where only
+  the newest sample carries `processes`.
+- `e2e/check.sh` asserts the protocol end to end and does not care which
+  agent is sending. Point `mini-bot` at the harness collector, swap the
+  stand-in out of `docker-compose.yml`, and it is an acceptance test for
+  this side unchanged.
+
+Note that an agent inside a container reads the *host's* `/proc/stat` and
+`/proc/meminfo` but only its own PID namespace, so host gauges and the
+process list describe different things. See `../e2e/README.md`.

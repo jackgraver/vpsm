@@ -1,0 +1,105 @@
+# Local end-to-end harness: a collector and the things that report to it, on
+# a container network, so the two halves of VPSM are exercised across a real
+# HTTP boundary rather than in the same process.
+#
+# See README.md. The short version:
+#
+#   docker compose up --build -d     bring the stack up
+#   ./check.sh                       assert the protocol behaves
+#   docker compose down              tear down (the database is ephemeral)
+#
+# Services:
+#   collector  the real collector, serving ingest and reads
+#   agent-sim  a stand-in agent, because mini-bot cannot report yet
+#   mini-bot   the real agent, sampling locally (profile: agent)
+
+name: vpsm-e2e
+
+x-token: &token dev
+
+services:
+  collector:
+    build:
+      context: ../collector
+      dockerfile: Dockerfile
+    command:
+      - serve
+      # Short retention and a fast sweep so the prune path actually runs
+      # during a test session instead of being theoretical.
+      - -retention=1h
+      - -prune-interval=1m
+      - -v
+    environment:
+      VPSM_TOKEN: *token
+    ports:
+      # Published on loopback only: the harness is for this machine. check.sh
+      # and the display commands reach the collector through this.
+      - "127.0.0.1:8777:8777"
+    # No volume by design. Every `down` discards the database, which is what
+    # you want from a test fixture — and it sidesteps the collector's refusal
+    # to open a file written by a different schema version.
+
+  agent-sim:
+    build:
+      context: ./agent-sim
+    depends_on:
+      collector:
+        condition: service_healthy
+    environment:
+      # By service name over the compose network — this is the part of the
+      # harness that proves the agent does not need to be on the same host.
+      VPSM_COLLECTOR_URL: http://collector:8777
+      VPSM_COLLECTOR_TOKEN: *token
+      VPSM_HOST_ID: sim-web-01
+      VPSM_INTERVAL_SECS: "5"
+      PROFILE: healthy
+
+  # A second reporter, in trouble on the axes the collector grades on their
+  # own scale: steal past its 15% crit line, a filesystem near full by both
+  # bytes and inodes, swap in use, error counters moving. Two hosts also mean
+  # the fleet overview has more than one row to lay out.
+  agent-sim-hot:
+    build:
+      context: ./agent-sim
+    depends_on:
+      collector:
+        condition: service_healthy
+    environment:
+      VPSM_COLLECTOR_URL: http://collector:8777
+      VPSM_COLLECTOR_TOKEN: *token
+      VPSM_HOST_ID: sim-db-01
+      VPSM_INTERVAL_SECS: "5"
+      PROFILE: hot
+
+  # The real agent. Behind a profile because it cannot report yet, so leaving
+  # it in the default `up` would put a container in the stack whose only
+  # output is a log line saying reporting isn't built. Start it with:
+  #
+  #   docker compose --profile agent up --build -d mini-bot
+  #   docker compose logs -f mini-bot
+  #
+  # What it proves today: the agent builds for and runs in a container, and
+  # samples /proc successfully there. What it will prove once reporting
+  # exists: everything agent-sim currently stands in for. At that point drop
+  # the profile, set these same VPSM_* variables, and delete agent-sim.
+  mini-bot:
+    profiles: [agent]
+    build:
+      context: ../mini-bot
+      dockerfile: Dockerfile
+    depends_on:
+      collector:
+        condition: service_healthy
+    environment:
+      VPSM_COLLECTOR_URL: http://collector:8777
+      VPSM_COLLECTOR_TOKEN: *token
+      VPSM_HOST_ID: agent-01
+      VPSM_INTERVAL_SECS: "5"
+      VPSM_TOP_PROCESSES: "10"
+    # Left in its own PID namespace, which is the default. Worth knowing what
+    # that means for the numbers: a container sees the host's /proc/stat and
+    # /proc/meminfo but only its own PID namespace, so the CPU and memory
+    # gauges are the whole host's while the process list is this container's
+    # handful of processes. That asymmetry is a property of containers, not a
+    # bug in the agent. Add `pid: host` to get the process view a real
+    # deployment sees, and read the caveat in README.md before doing so.

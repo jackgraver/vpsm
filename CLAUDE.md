@@ -13,6 +13,10 @@ RAM, disk, network, etc.) across one or more hosts.
 - **`collector/`** — the Go server that receives reports from every mini-bot
   instance, aggregates them, and is the place usage data gets stored/queried.
   See `collector/CLAUDE.md`.
+- **`e2e/`** — a local end-to-end harness: docker compose brings the
+  collector up as one container and the things reporting to it as others, so
+  the two halves are exercised across a real HTTP boundary. See
+  `e2e/README.md`.
 
 This is a single monorepo: one git repository at the `vpsm/` root covering
 both `mini-bot/` and `collector/`. They're still independently deployable
@@ -30,6 +34,12 @@ filesystem capacity and inodes, disk and network throughput, and a
 per-process task-manager view. It reads `/proc` directly and depends only on
 `libc` (for `statvfs`). `--once` prints a sample; `--bench` measures what the
 agent costs the host it watches. See `mini-bot/CLAUDE.md`.
+
+`e2e/` runs both halves in containers and asserts the protocol over real
+HTTP (`e2e/check.sh`). Because the agent cannot report yet, the agent side of
+that is a `curl`-based stand-in; the collector side is the real thing, and
+the assertions do not care which is sending, so they become the agent's
+acceptance tests the moment it can.
 
 The agent does not report yet — no HTTP, no serialisation, no buffering. What
 it collects is wider than the protocol below carries, and
