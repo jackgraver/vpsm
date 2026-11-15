@@ -4,3 +4,8 @@
 # collector (Go)
 /collector/collector
 /collector/vpsm-collector
+
+# collector runtime state (SQLite, plus its WAL sidecar files)
+vpsm.db
+vpsm.db-shm
+vpsm.db-wal
