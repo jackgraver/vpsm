@@ -6,12 +6,14 @@ RAM, disk, network, etc.) across one or more hosts.
 ## Components
 
 - **`mini-bot/`** — a tiny Rust agent deployed onto each monitored VPS. Samples
-  system usage on an interval and reports it to the collector. Written in
+  system usage on an interval into an on-disk spool, which the collector
+  pulls over SSH. Written in
   Rust specifically to stay small and low-overhead, since it runs alongside
   (and must not compete with) the services it's watching. See
   `mini-bot/CLAUDE.md`.
-- **`collector/`** — the Go server that receives reports from every mini-bot
-  instance, aggregates them, and is the place usage data gets stored/queried.
+- **`collector/`** — the Go side that pulls reports from every mini-bot
+  instance (or receives them over HTTP), and is the place usage data gets
+  stored/queried.
   See `collector/CLAUDE.md`.
 - **`e2e/`** — a local end-to-end harness: docker compose brings the
   collector up as one container and the things reporting to it as others, so
@@ -35,19 +37,19 @@ per-process task-manager view. It reads `/proc` directly and depends only on
 `libc` (for `statvfs`). `--once` prints a sample; `--bench` measures what the
 agent costs the host it watches. See `mini-bot/CLAUDE.md`.
 
-`e2e/` runs both halves in containers and asserts the protocol over real
-HTTP (`e2e/check.sh`). Because the agent cannot report yet, the agent side of
-that is a `curl`-based stand-in; the collector side is the real thing, and
-the assertions do not care which is sending, so they become the agent's
-acceptance tests the moment it can.
+The two halves talk by **pull over SSH** (see Transport below): the agent
+spools, the collector runs `mini-bot export` on the host whenever it runs
+and acks what it stored. `mini-bot/deploy/` installs the agent as a systemd
+service.
 
-The agent does not report yet — no HTTP, no serialisation, no buffering. What
-it collects is wider than the protocol below carries, and
-`AGENT-CONTRACT.md` is the working document between the two sides: what the
-agent provides field by field, what it needs from the collector, and the
-decisions reached on each. The collector side has answered everything open
-there, so the protocol has stopped moving — including per-process data,
-which v1 now carries as a per-host snapshot.
+`e2e/` runs both halves in containers and asserts the protocol over real
+HTTP (`e2e/check.sh`). The agent never pushes, so the agent side of that is a
+`curl`-based stand-in; it still covers the HTTP ingest path, which the pull
+path shares validation and storage with.
+
+`AGENT-CONTRACT.md` is the working document the protocol was settled in:
+what the agent provides field by field and the decisions reached on each.
+It predates the move from push to pull, which changed only the transport.
 
 ## Wire protocol
 
@@ -56,26 +58,38 @@ Decided and implemented on the collector side, and reconciled against
 for the reasoning behind each choice). The authoritative definition is
 `collector/internal/protocol/protocol.go`; change both ends together.
 
-- **Transport**: HTTP `POST /v1/reports`, JSON body, optional
-  `Content-Encoding: gzip`. Chosen for being debuggable with curl and
-  needing no schema compiler on either end; the envelope leaves room for a
-  compact binary encoding later without reshaping the data.
-- **Auth**: `Authorization: Bearer <token>`, one shared token per
-  deployment. The collector refuses to start without one unless
-  `-allow-anonymous` is passed explicitly.
+- **Transport: pull over SSH.** The collector is not always running —
+  typically a laptop, behind NAT, which a VPS cannot reach but which can
+  always reach the VPS. So the agent spools every sample to disk and the
+  collector runs `ssh <host> mini-bot export`, which streams one JSON
+  `PullFrame` per line (`protocol/pull.go`). The collector writes
+  `ack <cursor>` back on stdin once a frame is *committed*, and only then
+  does the agent delete it. SSH is the auth; the agent has no network code
+  and its unit denies it sockets entirely. `export --follow` keeps the
+  session open for a live view instead of a handshake per refresh.
+- **Acks use a spool sequence number, not a timestamp**, so a clock stepped
+  backwards cannot make an ack cover samples never delivered.
+- **The spool is a backlog, not a history**: with regular pulls it holds
+  minutes. Past half its cap (`VPSM_SPOOL_MAX_MB`) the oldest samples are
+  thinned to one per `VPSM_SPOOL_THIN_SECS` — lossless for averages, since
+  the wire carries counters — and only past the full cap are they dropped.
+- **HTTP push still exists** on the collector (`serve`, `POST /v1/reports`,
+  bearer token, optional gzip) for a collector that does run all the time.
+  The agent does not implement it.
 - **Payload**: one report = one host's identity + a batch of 1..1024
   samples. Host metadata travels once per report, not once per sample.
-- **Batching**: an agent that cannot reach the collector buffers samples
-  and flushes them on the next successful call, dropping oldest when full.
+  Spooled samples carry no process list; the newest reading carries it, on
+  export, because the collector keeps only the newest snapshot anyway.
+- **Invalid samples are discarded, not held.** A pulled sample that fails
+  validation is dropped individually and acked past, the pull equivalent of
+  a 4xx the agent must not retry; holding it would block everything behind.
 - **Idempotency**: `(host id, sample timestamp)` identifies a sample.
   Re-delivery is counted as a duplicate and dropped, not an error, so an
   agent can retry a flush it is unsure landed. The response is
   `{accepted, duplicate}`.
 - **Errors carry a stable code**: every non-2xx body is
-  `{"error": "...", "code": "..."}`. The prose is for logs and its wording
-  is not stable; `protocol.ErrorCode` is what to branch on. It exists so an
-  agent can tell `clock_skew` (the operator fixes it) from `malformed` (the
-  agent author does) when both are 400s it must not retry.
+  `{"error": "...", "code": "..."}` (HTTP ingest). The prose is for logs
+  and its wording is not stable; `protocol.ErrorCode` is what to branch on.
 
 ### Counters, not rates
 

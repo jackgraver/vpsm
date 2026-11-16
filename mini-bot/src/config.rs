@@ -10,11 +10,30 @@
 //! than being fatal — a typo'd interval shouldn't take monitoring offline.
 
 use std::env;
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Shortest interval we'll honour. Sampling costs a `/proc` walk, and below
 /// about a second the agent starts showing up in its own measurements.
 pub(crate) const MIN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Where the spool lives unless `VPSM_SPOOL_DIR` or `--spool` says
+/// otherwise. `export` runs over a bare SSH session with no environment
+/// from the systemd unit, so the default is what it will usually find.
+pub const DEFAULT_SPOOL_DIR: &str = "/var/lib/vpsm/spool";
+
+/// What this invocation is for.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Mode {
+    /// Sample on an interval into the spool. The service.
+    Monitor,
+    /// Print one sample and exit.
+    Once,
+    /// Measure what the agent costs this host and exit.
+    Bench,
+    /// Stream the spool to a collector on stdout (see `export`).
+    Export { follow: bool },
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -32,16 +51,19 @@ pub struct Config {
     /// file read per reported process and needs privileges the agent may not
     /// have, so it degrades quietly when unavailable.
     pub process_io: bool,
-    /// Where the collector lives. Unused so far — the wire protocol between
-    /// the two halves isn't decided yet (see the root `CLAUDE.md`), so this
-    /// is read and validated but not yet dialled.
-    pub collector_url: Option<String>,
-    /// Print one sample and exit, instead of looping. For eyeballing output
-    /// on a new box and for `cargo run`.
-    pub once: bool,
-    /// Measure what the agent costs this host and exit, instead of
-    /// monitoring it. See `bench`.
-    pub bench: bool,
+    /// The operator-assigned identity every stored row hangs off
+    /// (`VPSM_HOST_ID`). Required to monitor: there is no safe default,
+    /// because hostnames are not unique across VPSes and data filed under
+    /// the wrong host is found weeks later.
+    pub host_id: Option<String>,
+    /// The spool directory (`VPSM_SPOOL_DIR`, or `--spool <dir>`).
+    pub spool_dir: PathBuf,
+    /// Cap on uncollected data (`VPSM_SPOOL_MAX_MB`). Past half of it the
+    /// oldest samples are thinned; past all of it they are dropped.
+    pub spool_max_bytes: u64,
+    /// Resolution thinned samples are kept at (`VPSM_SPOOL_THIN_SECS`).
+    pub spool_thin_secs: u64,
+    pub mode: Mode,
 }
 
 impl Default for Config {
@@ -50,9 +72,11 @@ impl Default for Config {
             interval: Duration::from_secs(5),
             top_processes: 10,
             process_io: true,
-            collector_url: None,
-            once: false,
-            bench: false,
+            host_id: None,
+            spool_dir: PathBuf::from(DEFAULT_SPOOL_DIR),
+            spool_max_bytes: 200 * 1024 * 1024,
+            spool_thin_secs: 60,
+            mode: Mode::Monitor,
         }
     }
 }
@@ -60,9 +84,10 @@ impl Default for Config {
 impl Config {
     /// Build a config from the environment, falling back to defaults.
     ///
-    /// Also accepts a bare `--once` argument, which is the one thing that's
-    /// awkward as an env var because it's about this single invocation rather
-    /// than about how the agent is deployed.
+    /// Arguments pick the mode — `--once`, `--bench`, `export [--follow]` —
+    /// since those are about this single invocation rather than about how the
+    /// agent is deployed. `--spool <dir>` overrides the spool location for
+    /// `export`, which runs without the unit's environment.
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
 
@@ -97,12 +122,46 @@ impl Config {
             }
         }
 
-        cfg.collector_url = var("VPSM_COLLECTOR_URL");
-        let args: Vec<String> = env::args().skip(1).collect();
-        cfg.once = args.iter().any(|arg| arg == "--once");
-        cfg.bench = args.iter().any(|arg| arg == "--bench");
+        cfg.host_id = var("VPSM_HOST_ID");
+        if let Some(dir) = var("VPSM_SPOOL_DIR") {
+            cfg.spool_dir = PathBuf::from(dir);
+        }
+        if let Some(raw) = var("VPSM_SPOOL_MAX_MB") {
+            match raw.parse::<u64>() {
+                // Below a few segments' worth, thinning has nothing to work with.
+                Ok(mb) if mb >= 4 => cfg.spool_max_bytes = mb * 1024 * 1024,
+                _ => warn_ignored("VPSM_SPOOL_MAX_MB", &raw, "expected whole megabytes, at least 4"),
+            }
+        }
+        if let Some(raw) = var("VPSM_SPOOL_THIN_SECS") {
+            match raw.parse::<u64>() {
+                Ok(secs) if secs >= 1 => cfg.spool_thin_secs = secs,
+                _ => warn_ignored("VPSM_SPOOL_THIN_SECS", &raw, "expected whole seconds"),
+            }
+        }
 
+        let args: Vec<String> = env::args().skip(1).collect();
+        cfg.apply_args(&args);
         cfg
+    }
+
+    fn apply_args(&mut self, args: &[String]) {
+        let has = |flag: &str| args.iter().any(|arg| arg == flag);
+        self.mode = if args.first().is_some_and(|arg| arg == "export") {
+            Mode::Export { follow: has("--follow") }
+        } else if has("--bench") {
+            Mode::Bench
+        } else if has("--once") {
+            Mode::Once
+        } else {
+            Mode::Monitor
+        };
+        if let Some(i) = args.iter().position(|arg| arg == "--spool") {
+            match args.get(i + 1) {
+                Some(dir) => self.spool_dir = PathBuf::from(dir),
+                None => eprintln!("mini-bot: --spool needs a directory; using {}", self.spool_dir.display()),
+            }
+        }
     }
 }
 
@@ -141,6 +200,24 @@ mod tests {
             assert_eq!(parse_bool(raw), Some(false), "{raw}");
         }
         assert_eq!(parse_bool("maybe"), None);
+    }
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn arguments_pick_the_mode() {
+        let mut cfg = Config::default();
+        cfg.apply_args(&args(&[]));
+        assert_eq!(cfg.mode, Mode::Monitor);
+        cfg.apply_args(&args(&["--once"]));
+        assert_eq!(cfg.mode, Mode::Once);
+        cfg.apply_args(&args(&["export"]));
+        assert_eq!(cfg.mode, Mode::Export { follow: false });
+        cfg.apply_args(&args(&["export", "--follow", "--spool", "/tmp/s"]));
+        assert_eq!(cfg.mode, Mode::Export { follow: true });
+        assert_eq!(cfg.spool_dir, PathBuf::from("/tmp/s"));
     }
 
     #[test]

@@ -13,6 +13,7 @@ const HOSTNAME: &str = "/proc/sys/kernel/hostname";
 const OSRELEASE: &str = "/proc/sys/kernel/osrelease";
 const UPTIME: &str = "/proc/uptime";
 const LOADAVG: &str = "/proc/loadavg";
+const OS_RELEASE: &str = "/etc/os-release";
 
 /// Which machine this is. Read once; the collector needs it to tell the
 /// reports from different hosts apart.
@@ -20,6 +21,9 @@ const LOADAVG: &str = "/proc/loadavg";
 pub struct Identity {
     pub hostname: String,
     pub kernel: String,
+    /// Distribution name, e.g. "Ubuntu 24.04.5 LTS". Empty when
+    /// `/etc/os-release` is missing, which some minimal containers manage.
+    pub os: String,
     pub cpus: usize,
 }
 
@@ -30,9 +34,18 @@ impl Identity {
             // to start over; the collector can fall back to the peer address.
             hostname: procfs::read_trimmed(HOSTNAME).unwrap_or_else(|_| "unknown".into()),
             kernel: procfs::read_trimmed(OSRELEASE).unwrap_or_else(|_| "unknown".into()),
+            os: procfs::read(OS_RELEASE).map(|text| parse_os_release(&text)).unwrap_or_default(),
             cpus,
         }
     }
+}
+
+/// The `PRETTY_NAME` from os-release, unquoted.
+pub fn parse_os_release(text: &str) -> String {
+    text.lines()
+        .find_map(|line| line.strip_prefix("PRETTY_NAME="))
+        .map(|value| value.trim().trim_matches('"').to_string())
+        .unwrap_or_default()
 }
 
 /// Run-queue pressure, from `/proc/loadavg`.
@@ -83,6 +96,13 @@ pub fn parse_uptime(text: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_os_release_pretty_name() {
+        let text = "NAME=\"Ubuntu\"\nPRETTY_NAME=\"Ubuntu 24.04.5 LTS\"\nID=ubuntu\n";
+        assert_eq!(parse_os_release(text), "Ubuntu 24.04.5 LTS");
+        assert_eq!(parse_os_release("ID=alpine\n"), "");
+    }
 
     #[test]
     fn parses_loadavg() {

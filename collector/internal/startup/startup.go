@@ -16,12 +16,14 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"vpsm-collector/internal/cli"
 	"vpsm-collector/internal/client"
 	"vpsm-collector/internal/config"
+	"vpsm-collector/internal/pull"
 	"vpsm-collector/internal/query"
 	"vpsm-collector/internal/storage"
 )
@@ -63,6 +65,8 @@ func dispatch(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	switch cmd {
 	case "serve":
 		return serve(ctx, rest, stderr)
+	case "pull":
+		return pullCommand(ctx, rest, stdout, stderr)
 	case "status":
 		return status(ctx, rest, stdout, stderr)
 	case "host":
@@ -89,13 +93,15 @@ Usage:
 
 Commands:
   serve      Receive reports from mini-bot agents over HTTP.
+  pull       Fetch spooled samples from agents over SSH.
   status     Print a one-line-per-host overview of the fleet.
   watch      Redraw the overview on an interval (live view).
   host <id>  Print everything known about one host.
   version    Print the collector version.
 
 The display commands read the SQLite file directly by default, or a remote
-collector's API with -remote.
+collector's API with -remote. With -pull (or VPSM_PULL) they fetch from the
+agents over SSH first, and watch keeps a live session open to each.
 
 Environment:
   VPSM_ADDR       Listen address for serve (default %s)
@@ -103,9 +109,11 @@ Environment:
   VPSM_TOKEN      Shared bearer token for agents and readers
   VPSM_REMOTE     Collector URL for the display commands
   VPSM_RETENTION  How long to keep samples, e.g. 720h (default %s)
+  VPSM_PULL       Agents to pull from: ssh destinations, comma-separated
+  VPSM_AGENT_CMD  Command run on the agent host (default "%s")
 
 Run 'vpsm-collector <command> -h' for a command's flags.
-`, Version, config.DefaultAddr, config.DefaultDBPath, config.DefaultRetention)
+`, Version, config.DefaultAddr, config.DefaultDBPath, config.DefaultRetention, pull.DefaultAgentCommand)
 }
 
 // serve runs the API server.
@@ -155,11 +163,14 @@ func status(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		return fmt.Errorf("status takes no arguments (did you mean `host %s`?)", extra[0])
 	}
 
-	src, closeSrc, err := openSource(cfg)
+	src, store, closeSrc, err := openSource(cfg)
 	if err != nil {
 		return err
 	}
 	defer closeSrc()
+	if err := pullFirst(ctx, cfg, store, stderr); err != nil {
+		return err
+	}
 
 	return cli.Status(ctx, src, stdout, history)
 }
@@ -174,11 +185,14 @@ func host(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return errors.New("host takes exactly one host id, e.g. `host web-01`")
 	}
 
-	src, closeSrc, err := openSource(cfg)
+	src, store, closeSrc, err := openSource(cfg)
 	if err != nil {
 		return err
 	}
 	defer closeSrc()
+	if err := pullFirst(ctx, cfg, store, stderr); err != nil {
+		return err
+	}
 
 	return cli.Host(ctx, src, stdout, extra[0], history)
 }
@@ -197,6 +211,7 @@ func watch(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	flags.StringVar(&cfg.Token, "token", cfg.Token, "bearer token for -remote")
 	history := flags.Int("history", config.DefaultHistory, "samples of history to read per host")
 	interval := flags.Duration("interval", DefaultWatchInterval, "how often to redraw")
+	pullFlag := pullFlags(flags, &cfg)
 
 	extra, err := parse(flags, args)
 	if err != nil {
@@ -205,14 +220,24 @@ func watch(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(extra) > 0 {
 		return fmt.Errorf("watch takes no arguments, got %q", extra[0])
 	}
+	cfg.Pull = config.SplitTargets(*pullFlag)
 
-	src, closeSrc, err := openSource(cfg)
+	src, store, closeSrc, err := openSource(cfg)
 	if err != nil {
 		return err
 	}
 	defer closeSrc()
 
-	return cli.Watch(ctx, src, stdout, *history, *interval)
+	var header func() string
+	if len(cfg.Pull) > 0 {
+		// The screen is redrawn wholesale, so session failures go in the
+		// header rather than to a log that would be painted over.
+		quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+		followers := cli.StartFollowing(ctx, store, cfg.Pull, pullOptions(cfg, quiet), quiet)
+		header = followers.Status
+	}
+
+	return cli.Watch(ctx, src, stdout, *history, *interval, header)
 }
 
 // displayFlags registers the flags the read-only commands share and returns
@@ -229,12 +254,117 @@ func displayFlags(name string, args []string, stderr io.Writer) (config.Config, 
 	flags.StringVar(&cfg.Remote, "remote", cfg.Remote, "read a remote collector's API instead of -db")
 	flags.StringVar(&cfg.Token, "token", cfg.Token, "bearer token for -remote")
 	history := flags.Int("history", config.DefaultHistory, "samples of history to read per host")
+	pullFlag := pullFlags(flags, &cfg)
 
 	extra, err := parse(flags, args)
 	if err != nil {
 		return cfg, 0, nil, err
 	}
+	cfg.Pull = config.SplitTargets(*pullFlag)
 	return cfg, *history, extra, nil
+}
+
+// pullFlags registers the flags for pulling before display.
+func pullFlags(flags *flag.FlagSet, cfg *config.Config) *string {
+	flags.StringVar(&cfg.AgentCommand, "agent-cmd", cfg.AgentCommand, "command run on the agent host (default \""+pull.DefaultAgentCommand+"\")")
+	flags.DurationVar(&cfg.Retention, "retention", cfg.Retention, "how long to keep samples after a pull; 0 keeps them forever")
+	return flags.String("pull", strings.Join(cfg.Pull, ","),
+		"agents to pull from over SSH first, comma-separated (user@host, or \"local\")")
+}
+
+func pullOptions(cfg config.Config, log *slog.Logger) pull.Options {
+	return pull.Options{AgentCommand: cfg.AgentCommand, Log: log}
+}
+
+// pullFirst brings the database up to date before a one-shot view. Hosts
+// that cannot be reached are reported and the view is shown anyway: their
+// rows are graded stale, which is itself the answer.
+func pullFirst(ctx context.Context, cfg config.Config, store *storage.Store, stderr io.Writer) error {
+	if len(cfg.Pull) == 0 {
+		return nil
+	}
+	log := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	if err := cli.PullAll(ctx, store, cfg.Pull, pullOptions(cfg, log), stderr); err != nil {
+		fmt.Fprintf(stderr, "showing what was already stored: %v\n", err)
+	}
+	if err := cli.Prune(ctx, store, cfg.Retention); err != nil {
+		return err
+	}
+	fmt.Fprintln(stderr)
+	return nil
+}
+
+// pullCommand fetches from agents and stores what they send, without
+// displaying it.
+func pullCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+
+	flags := flag.NewFlagSet("pull", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	flags.Usage = func() {
+		fmt.Fprintf(stderr, "Usage: vpsm-collector pull [flags] [target...]\n\n"+
+			"Targets are ssh destinations (user@host, or a ~/.ssh/config alias), or \"local\"\n"+
+			"to run the agent on this machine. With none given, VPSM_PULL is used.\n\n")
+		flags.PrintDefaults()
+	}
+	flags.StringVar(&cfg.DBPath, "db", cfg.DBPath, "path to the SQLite database")
+	flags.StringVar(&cfg.AgentCommand, "agent-cmd", cfg.AgentCommand, "command run on the agent host (default \""+pull.DefaultAgentCommand+"\")")
+	flags.DurationVar(&cfg.Retention, "retention", cfg.Retention, "how long to keep samples; 0 keeps them forever")
+	follow := flags.Bool("follow", false, "stay connected and store samples as they are taken, until interrupted")
+	verbose := flags.Bool("v", false, "log at debug level")
+
+	targets, err := parse(flags, args)
+	if err != nil {
+		return err
+	}
+	if len(targets) == 0 {
+		targets = cfg.Pull
+	}
+	if len(targets) == 0 {
+		return errors.New("no agents to pull from: name one, e.g. `pull jack@203.0.113.7`, or set VPSM_PULL")
+	}
+
+	level := slog.LevelWarn
+	if *verbose {
+		level = slog.LevelDebug
+	}
+	log := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: level}))
+
+	store, err := storage.Open(cfg.DBPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err := cli.Prune(ctx, store, cfg.Retention); err != nil {
+		return err
+	}
+
+	if !*follow {
+		return cli.PullAll(ctx, store, targets, pullOptions(cfg, log), stdout)
+	}
+
+	followers := cli.StartFollowing(ctx, store, targets, pullOptions(cfg, log), log)
+	fmt.Fprintf(stderr, "following %s into %s; ctrl-c to stop\n", strings.Join(targets, ", "), cfg.DBPath)
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	last := ""
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if status := followers.Status(); status != last {
+				fmt.Fprintln(stderr, status)
+				last = status
+			}
+			if err := cli.Prune(ctx, store, cfg.Retention); err != nil && ctx.Err() == nil {
+				log.Error("prune", slog.Any("err", err))
+			}
+		}
+	}
 }
 
 // parse is flag.FlagSet.Parse with argument permutation, so
@@ -260,26 +390,31 @@ func parse(flags *flag.FlagSet, args []string) ([]string, error) {
 }
 
 // openSource resolves where the display commands read from: a remote
-// collector if asked, otherwise the local database.
-func openSource(cfg config.Config) (query.Source, func(), error) {
+// collector if asked, otherwise the local database. The store is returned
+// separately (nil for a remote) because pulling writes to it.
+func openSource(cfg config.Config) (query.Source, *storage.Store, func(), error) {
 	if cfg.Remote != "" {
+		if len(cfg.Pull) > 0 {
+			return nil, nil, nil, errors.New("-pull stores into the local database and cannot be combined with -remote")
+		}
 		c, err := client.New(cfg.Remote, cfg.Token)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return c, func() {}, nil
+		return c, nil, func() {}, nil
 	}
 
 	// storage.Open would happily create an empty database here, which would
-	// report "no hosts" for what is really a wrong path.
-	if _, err := os.Stat(cfg.DBPath); errors.Is(err, fs.ErrNotExist) {
-		return nil, nil, fmt.Errorf("no database at %s: start the collector with `serve`, "+
-			"or point somewhere else with -db or -remote", cfg.DBPath)
+	// report "no hosts" for what is really a wrong path. Pulling is the
+	// exception: then an empty database is about to be filled.
+	if _, err := os.Stat(cfg.DBPath); errors.Is(err, fs.ErrNotExist) && len(cfg.Pull) == 0 {
+		return nil, nil, nil, fmt.Errorf("no database at %s: pull from an agent with `pull` or -pull, "+
+			"start the collector with `serve`, or point somewhere else with -db or -remote", cfg.DBPath)
 	}
 
 	store, err := storage.Open(cfg.DBPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return store, func() { store.Close() }, nil
+	return store, store, func() { store.Close() }, nil
 }

@@ -37,12 +37,14 @@ func Host(ctx context.Context, src query.Source, out io.Writer, id string, histo
 }
 
 // Watch redraws the overview on an interval until the context is cancelled.
+// header, if non-nil, supplies an extra status line drawn above the table
+// each frame (the state of live pull sessions, for one).
 //
 // This is the cheapest useful version of a live display, and deliberately
 // the shape a TUI would take: the renderer is already a pure function of the
 // data, so moving to a full TUI framework replaces this loop and keeps
 // everything below it.
-func Watch(ctx context.Context, src query.Source, out io.Writer, history int, interval time.Duration) error {
+func Watch(ctx context.Context, src query.Source, out io.Writer, history int, interval time.Duration, header func() string) error {
 	if interval <= 0 {
 		return errors.New("watch interval must be positive")
 	}
@@ -64,8 +66,18 @@ func Watch(ctx context.Context, src query.Source, out io.Writer, history int, in
 			// in place instead of blanked first.
 			buf.WriteString("\x1b[H\x1b[J")
 		}
-		fmt.Fprintf(&buf, "%s  ·  refreshing every %s  ·  ctrl-c to exit\n\n",
+		fmt.Fprintf(&buf, "%s  ·  refreshing every %s  ·  ctrl-c to exit\n",
 			o.Now.Format(time.TimeOnly), interval)
+		if header != nil {
+			// Erase to end of line: the header changes length between
+			// frames and is overwritten in place, not cleared first.
+			buf.WriteString(header())
+			if o.Color {
+				buf.WriteString("\x1b[K")
+			}
+			buf.WriteString("\n")
+		}
+		buf.WriteString("\n")
 		if err := view.Overview(&buf, hosts, o); err != nil {
 			return err
 		}

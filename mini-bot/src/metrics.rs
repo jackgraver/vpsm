@@ -40,6 +40,13 @@ pub struct Sample {
     pub context_switches_per_sec: f64,
     pub procs_running: u64,
     pub procs_blocked: u64,
+    /// The aggregate tick counters this sample's `cpu` percentages were
+    /// derived from. The wire carries these rather than the percentages, so
+    /// the collector can diff across a gap in delivery.
+    pub cpu_ticks: cpu::Times,
+    /// Raw interface counters, for the same reason. `networks` is the rate
+    /// view of the same readings, for local display.
+    pub net_counters: Vec<net::Counters>,
     pub memory: memory::Memory,
     pub filesystems: Vec<disk::Filesystem>,
     pub disks: Vec<disk::IoRates>,
@@ -134,6 +141,8 @@ impl Sampler {
             ),
             procs_running: cpu.procs_running,
             procs_blocked: cpu.procs_blocked,
+            cpu_ticks: cpu.total,
+            net_counters: networks.clone(),
             memory,
             filesystems: self
                 .warnings

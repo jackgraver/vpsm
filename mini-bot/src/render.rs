@@ -240,7 +240,7 @@ fn truncate(text: &str, max: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::metrics::{cpu, disk, host, memory, net, process};
 
@@ -284,10 +284,11 @@ mod tests {
         assert_eq!(truncate("far too long to fit", 10).chars().count(), 10);
     }
 
-    fn fixture() -> (Identity, Sample) {
+    pub(crate) fn fixture() -> (Identity, Sample) {
         let identity = Identity {
             hostname: "web-01".into(),
             kernel: "6.18.53".into(),
+            os: "Debian GNU/Linux 13".into(),
             cpus: 2,
         };
         let sample = Sample {
@@ -309,6 +310,27 @@ mod tests {
             context_switches_per_sec: 4096.0,
             procs_running: 3,
             procs_blocked: 1,
+            cpu_ticks: cpu::Times {
+                user: 4_000,
+                nice: 10,
+                system: 900,
+                idle: 30_000,
+                iowait: 200,
+                irq: 50,
+                softirq: 80,
+                steal: 15,
+            },
+            net_counters: vec![net::Counters {
+                name: "eth0".into(),
+                rx_bytes: 9_000_000,
+                rx_packets: 42_000,
+                rx_errors: 0,
+                rx_dropped: 2,
+                tx_bytes: 4_000_000,
+                tx_packets: 31_000,
+                tx_errors: 0,
+                tx_dropped: 0,
+            }],
             memory: memory::Memory {
                 total_bytes: 16 * 1024 * 1024 * 1024,
                 used_bytes: 4 * 1024 * 1024 * 1024,

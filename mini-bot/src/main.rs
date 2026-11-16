@@ -2,7 +2,8 @@
 //!
 //! Deployed onto each VPS that's being watched. On an interval, samples
 //! local system usage (CPU, memory, disk, network, and per-process usage)
-//! and reports those samples to the central VPSM collector over the network.
+//! into an on-disk spool, which the VPSM collector pulls over SSH whenever
+//! it runs (`mini-bot export`) and acknowledges so the spool can be freed.
 //!
 //! Built in Rust and kept deliberately small and dependency-light: this is
 //! meant to run continuously (e.g. under systemd) on boxes that are also
@@ -14,11 +15,14 @@
 //! happens there and in the modules it wires together; keep `main` minimal.
 
 mod bench;
+mod export;
 mod config;
 mod metrics;
 mod procfs;
 mod render;
+mod spool;
 mod startup;
+mod wire;
 
 fn main() {
     startup::run();

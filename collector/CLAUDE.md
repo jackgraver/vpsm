@@ -1,18 +1,24 @@
 # collector
 
-The VPSM central server. Receives usage reports sent by every `mini-bot`
-agent (see `../mini-bot/CLAUDE.md`), stores them, and renders them for
-review in the terminal.
+The VPSM collector. Pulls usage reports from every `mini-bot` agent over
+SSH (see `../mini-bot/CLAUDE.md`), or receives them over HTTP, stores them,
+and renders them for review in the terminal.
 
-One binary does both jobs: `serve` is the server, and `status`/`watch`/`host`
-are the views over what it collected.
+It does not need to run all the time: agents spool until it next pulls.
 
 ## Commands
 
-    vpsm-collector serve -token <tok>      # receive reports (default 127.0.0.1:8777)
-    vpsm-collector status                  # one line per host: the "anything on fire?" view
-    vpsm-collector watch -interval 5s      # same, redrawn live
+    vpsm-collector pull user@host          # fetch each agent's backlog, ack it, exit
+    vpsm-collector pull -follow user@host  # stay connected, store as samples are taken
+    vpsm-collector status -pull user@host  # pull, then the "anything on fire?" view
+    vpsm-collector watch -pull user@host   # live view over a held-open session per host
     vpsm-collector host web-01             # everything known about one host
+    vpsm-collector serve -token <tok>      # HTTP ingest, for a collector that is always up
+
+`VPSM_PULL=user@host,other` makes `-pull` the default for the display
+commands, so `status` alone fetches first. Targets are ssh destinations
+(`~/.ssh/config` aliases work) or `local`. The ssh runs with
+`BatchMode=yes`, so a key that needs a passphrase must be in an agent.
 
 The display commands read the SQLite file directly by default, or a remote
 collector over HTTP with `-remote <url> -token <tok>`. Both satisfy the same
@@ -34,9 +40,14 @@ two readings identical.
   both storage and the HTTP client implement.
 - `internal/api` — HTTP handlers, auth, request limits.
 - `internal/client` — reads a *remote* collector's API as a `query.Source`.
+- `internal/pull` — runs `mini-bot export` over SSH, stores each frame,
+  acks it. Validation is per sample: an invalid one is discarded and acked
+  past rather than blocking the batch, and nothing is acked that is not yet
+  committed.
 - `internal/view` — terminal rendering. Pure functions from query data to
   text; colour and width are passed in, not discovered.
-- `internal/cli` — the command implementations.
+- `internal/cli` — the command implementations, including pull fan-out
+  and the reconnecting follow sessions behind `watch -pull`.
 - `internal/config` — settings, resolved flag > environment > default.
 
 ## Decisions worth not re-litigating
@@ -64,6 +75,13 @@ longer reasoning.
   high-cardinality command strings, and the question it answers is almost
   always about right now. A backfilled report cannot overwrite a newer
   snapshot. Widening to full history later is a new table, not a reshape.
+- **Pull is the default transport; push stays.** A laptop collector behind
+  NAT cannot be reached by a VPS, but can always reach it, and SSH brings
+  auth with it. `serve` remains for a collector that is always up.
+- **A one-shot pull shows the view even if a host is unreachable.** Its
+  rows grade stale, which is the finding. `pull`, and the display commands
+  with `-pull`, also apply retention, since without `serve` nothing else
+  sweeps.
 - **Auth is required to serve.** No token and no `-allow-anonymous` is a
   startup error, because the alternative — quietly accepting unauthenticated
   reports — means anyone who can reach the port can forge or flood metrics.

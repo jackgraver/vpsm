@@ -2,7 +2,8 @@
 
 The VPSM monitoring agent. Deployed onto each VPS being watched; samples
 local system usage (CPU, memory, disk, network, and per-process usage) on an
-interval and reports it to the collector (see `../collector/CLAUDE.md`).
+interval into an on-disk spool, which the collector pulls over SSH (see
+`../collector/CLAUDE.md`).
 
 ## Why Rust
 
@@ -31,11 +32,13 @@ re-measures all of it on whatever box you run it on.
 - `src/metrics/{cpu,memory,disk,net,process,host}.rs` — one `/proc` source
   each, independent of one another.
 - `src/render.rs` — human-readable text for a `Sample`. A local debugging
-  view only (`--once`, or a box with no collector); nothing should ever
-  parse it.
-
-A `report` module for talking to the collector is still to be built — see
-Status below.
+  view only (`--once`); nothing should ever parse it.
+- `src/wire.rs` — a `Sample` as the collector's protocol JSON, hand-written
+  (no serde). Also where values the collector would reject are made safe.
+- `src/spool.rs` — the on-disk backlog: append, rotate, thin, drop, ack.
+- `src/export.rs` — `mini-bot export [--follow]`, the command the collector
+  runs over SSH to drain the spool.
+- `deploy/` — systemd unit and `install.sh`.
 
 ## Sampling approach
 
@@ -159,93 +162,79 @@ at 3 ms.
 
 ## Status
 
-Sampling and self-measurement are built and covered by tests. Reporting is
-not built at all: no HTTP, no serialisation, no buffering.
-`VPSM_COLLECTOR_URL` is read and logged at startup, then ignored. The
-contract to build it against is in the next section.
+Sampling, self-measurement, serialisation, the spool and `export` are built
+and covered by tests. The agent has no network code and should not grow
+any: the collector pulls. The transport is described in the root
+`CLAUDE.md` and in `../collector/internal/protocol/pull.go`, which is
+authoritative.
 
-What this agent samples is wider than that protocol carries — most
-significantly there is nowhere to put per-process data, which is the entire
-task-manager feature. Those gaps, and the decisions needed to close them,
-are written up in the root `AGENT-CONTRACT.md`, which is the working
-document between this side and the collector side. Don't re-derive them
-here; that file is where the answers will land.
+## Modes
 
-## Reporting to the collector
+    mini-bot                     sample into the spool forever (the service)
+    mini-bot --once              print one sample and exit
+    mini-bot --bench             measure the agent's own cost and exit
+    mini-bot export [--follow]   stream the spool to a collector on stdout
 
-Not built yet, and the next piece of work. The protocol is settled: the
-authoritative definition is `../collector/internal/protocol/protocol.go`,
-the reasoning is in `../AGENT-CONTRACT.md` (every open question there has
-been answered by the collector side), and the summary is in the root
-`CLAUDE.md`. Keep this end in sync with that file.
+Configuration is environment variables (`VPSM_*`, see `config.rs`). The
+service reads them from `/etc/vpsm/mini-bot.env`. **`VPSM_HOST_ID` is
+required to monitor and the agent exits non-zero without it**: hostnames
+are not unique across VPSes, and data filed under the wrong host is found
+weeks later. `export` runs over a bare SSH session without that
+environment, so it reads the host block from the spool (`host.json`) and
+finds the spool at the default path, or `--spool <dir>`.
 
-What it asks of this side:
+## The spool
 
-- `POST /v1/reports`, JSON body, `Authorization: Bearer <token>` from
-  `VPSM_COLLECTOR_TOKEN`. `Content-Encoding: gzip` is accepted but entirely
-  optional.
-- **`VPSM_HOST_ID` is required and the agent should exit non-zero without
-  it.** There is no safe default — the hostname is not unique across VPSes,
-  and the id is the key every stored row hangs off. A failed unit is a
-  five-minute fix; data landing under the wrong host is found weeks later.
-- A report carries the host's identity once plus 1..1024 samples. Buffer
-  when the collector is unreachable, flush on the next successful call, and
-  **drop oldest** when the buffer is full.
-- Retrying a flush that may already have landed is safe: duplicates are
-  counted and dropped, and the response reports `{accepted, duplicate}`.
-  The buffer can be released once `accepted + duplicate` covers what was
-  sent.
-- Retry 5xx, 429, 408 and connection failures with backoff. Never retry
-  other 4xx — a rejected payload stays rejected, and retrying forever is
-  how an agent becomes the outage. On 413, halve the batch and retry.
-- **Branch on `code`, not on the message.** Every non-2xx body carries a
-  stable `protocol.ErrorCode`; the prose beside it is for logs and may be
-  reworded. `clock_skew` means an operator must fix the clock on this box;
-  `malformed` and `invalid` mean the agent has a bug. Both are 400s that
-  must not be retried, which is exactly why they need telling apart.
-- Send `procs_running` and `procs_blocked` on **every** sample, not only
-  inside the process block. They are host gauges, and paired with CPU
-  `iowait` they are what separates "stuck on storage" from "busy" — which
-  only reads as an answer if they have history.
-- **Send counters, not rates**, for anything the kernel counts: CPU ticks
-  (all eight states), network bytes, packets, errors and drops. The
-  collector diffs consecutive samples, which is what lets it bridge a lost
-  report. Per-process figures stay as rates computed here, since a PID is
-  not a stable identity between samples.
-- Always send `uptime_secs`. A drop in it is how the collector detects a
-  reboot and suppresses a bogus spike across the boundary.
-- Send `at` from the local clock even if it looks unsynchronised. The
-  collector rejects only timestamps more than 24h in the future; a slightly
-  wrong clock still produces usable data, and refusing to report would turn
-  a minor annoyance into a blackout for that host.
+`spool.rs` has the full layout in its module doc. What is worth knowing
+before changing it:
 
-Field names differ from this side's internal naming in a few places —
-`filesystems`/`mount_point`/`fs_type`, and `cpu.ticks` rather than a
-percentage. The protocol package is the source of truth.
+- **Acks name a sequence number, never a time.** Lines are
+  `<seq>\t<at_ms>\t<json>`; seqs only increase, and resume past the
+  `cursor` file after a restart even if every segment was deleted.
+- **Nothing is deleted on read**, only on ack, and the collector acks only
+  what it has committed. Re-sending is safe (duplicates).
+- **The newest segment is never deleted by an ack** — the daemon may still
+  be appending to it. Deletes and rewrites take a `flock`; appends do not.
+- **Spooled samples carry no process list.** The collector keeps only the
+  newest snapshot, so the full newest sample lives in `latest` and export
+  attaches it. This keeps a sample around 1.5–2 KB.
+- **Thinning before dropping.** Past half the cap, the oldest sealed
+  segments are rewritten to one sample per `VPSM_SPOOL_THIN_SECS`. The wire
+  carries counters, so averages across a thinned window stay exact.
+- **Sharing.** The service runs as root (per-process I/O needs it), `export`
+  as the SSH user. `install.sh` puts both in group `vpsm` with a setgid
+  directory, and both ends set umask 007.
 
-Not carried by v1, so no need to serialise them: per-CPU breakdowns,
-per-block-device disk I/O, and `cached`/`buffers` memory. Keep collecting
-them for `--once` if they are useful locally.
+## Wire format notes
 
-While developing this side, run the other half locally with
-`vpsm-collector serve -token dev`, then `vpsm-collector status` and
-`vpsm-collector host <id>` to see exactly what landed. Anything the
-collector cannot derive renders as `—` rather than zero, so a field that is
-not wired up yet is visibly absent rather than silently wrong.
+Field names follow `../collector/internal/protocol/protocol.go`, not this
+crate's internal naming (`filesystems`/`mount_point`/`fs_type`, `cpu.ticks`
+rather than percentages). The rules from the protocol that this side
+enforces:
 
-`../e2e` is the same loop with the collector in a container and the agent
-talking to it over a network, which is the arrangement a deployed agent
-actually faces. Two things there are worth having before writing the
-serialiser rather than after:
+- **Counters, not rates**, for CPU ticks (all eight states) and interface
+  bytes/packets/errors/drops. `Sample` carries the raw readings alongside
+  the rates `--once` displays. Per-process figures stay rates.
+- `procs_running`/`procs_blocked` and `uptime_secs` on every sample.
+- `at` from the local clock even if it looks unsynchronised.
+- Anything the collector rejects is fixed in `wire.rs` rather than shipped:
+  control characters in process names/commands, commands over 512 bytes,
+  more than 64 top processes, non-finite floats. A rejected sample is
+  discarded, so a bug here is silent data loss — keep the tests honest.
 
-- `e2e/agent-sim/gen-report.sh` emits a report this collector accepts, with
-  the reasoning for each field inline. It is the reference to diff the
-  serialiser's output against — including the mixed-batch shape, where only
-  the newest sample carries `processes`.
-- `e2e/check.sh` asserts the protocol end to end and does not care which
-  agent is sending. Point `mini-bot` at the harness collector, swap the
-  stand-in out of `docker-compose.yml`, and it is an acceptance test for
-  this side unchanged.
+Not carried by v1: per-CPU breakdowns, per-block-device disk I/O, and
+`cached`/`buffers` memory. They stay in `Sample` for `--once`.
+
+## Deploying
+
+Build a static binary (the Dockerfile's build stage produces one, musl), then
+on the host, from a directory holding `mini-bot`, `install.sh` and
+`mini-bot.service`:
+
+    sudo ./install.sh <host-id> [pull-user]
+
+It is idempotent: it upgrades the binary and unit and keeps an existing
+`/etc/vpsm/mini-bot.env` and spool.
 
 Note that an agent inside a container reads the *host's* `/proc/stat` and
 `/proc/meminfo` but only its own PID namespace, so host gauges and the

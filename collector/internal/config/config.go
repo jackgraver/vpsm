@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -47,6 +48,16 @@ type Config struct {
 	// Remote, when set, makes the display commands read from another
 	// collector's HTTP API instead of DBPath.
 	Remote string
+
+	// Pull is the agents to fetch from over SSH (VPSM_PULL): ssh
+	// destinations such as user@203.0.113.7 or a ~/.ssh/config alias. When
+	// set, the display commands pull before showing anything, and `watch`
+	// keeps a live session open to each.
+	Pull []string
+
+	// AgentCommand is what runs on the far end of a pull (VPSM_AGENT_CMD).
+	// Empty means pull.DefaultAgentCommand.
+	AgentCommand string
 }
 
 // Load returns a Config from the environment, falling back to defaults.
@@ -58,6 +69,8 @@ func Load() (Config, error) {
 		Retention:     DefaultRetention,
 		PruneInterval: DefaultPruneInterval,
 		Remote:        os.Getenv("VPSM_REMOTE"),
+		Pull:          SplitTargets(os.Getenv("VPSM_PULL")),
+		AgentCommand:  os.Getenv("VPSM_AGENT_CMD"),
 	}
 	if v := os.Getenv("VPSM_RETENTION"); v != "" {
 		d, err := time.ParseDuration(v)
@@ -94,6 +107,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("prune interval must be positive")
 	}
 	return nil
+}
+
+// SplitTargets parses a comma- or space-separated list of pull targets.
+func SplitTargets(raw string) []string {
+	return strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ' ' })
 }
 
 func env(key, fallback string) string {

@@ -127,7 +127,7 @@ func TestWatchRendersThenStopsOnCancel(t *testing.T) {
 	// must render immediately rather than waiting out the first tick.
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Watch(ctx, src, &out, 10, time.Hour) }()
+	go func() { done <- Watch(ctx, src, &out, 10, time.Hour, nil) }()
 
 	deadline := time.After(5 * time.Second)
 	for src.count() == 0 {
@@ -163,7 +163,7 @@ func TestWatchRendersThenStopsOnCancel(t *testing.T) {
 func TestWatchRejectsNonPositiveInterval(t *testing.T) {
 	src := &fakeSource{hosts: testHosts()}
 	var out bytes.Buffer
-	if err := Watch(context.Background(), src, &out, 10, 0); err == nil {
+	if err := Watch(context.Background(), src, &out, 10, 0, nil); err == nil {
 		t.Error("want an error for a zero interval")
 	}
 }
@@ -175,7 +175,7 @@ func TestWatchRedrawsOnTick(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- Watch(ctx, src, &out, 10, 5*time.Millisecond) }()
+	go func() { done <- Watch(ctx, src, &out, 10, 5*time.Millisecond, nil) }()
 
 	deadline := time.After(5 * time.Second)
 	for src.count() < 3 {
