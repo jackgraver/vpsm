@@ -1,9 +1,9 @@
-# The agent as a container image, used by the e2e harness in ../e2e.
+# The agent as a container image, used by the e2e harness in ../resources/e2e.
 #
 # Build context is this directory (mini-bot/). Only the manifest and src are
 # copied, which keeps the 1 GB local `target/` out of the build context.
 #
-# Read ../e2e/README.md before trusting the numbers this produces: a container
+# Read ../resources/e2e/README.md before trusting the numbers this produces: a container
 # sees the host's /proc/stat and /proc/meminfo but only its own PID namespace,
 # so host gauges are the host's and the process list is the container's.
 

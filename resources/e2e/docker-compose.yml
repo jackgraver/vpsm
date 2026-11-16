@@ -85,7 +85,7 @@ services:
   mini-bot:
     profiles: [agent]
     build:
-      context: ../mini-bot
+      context: ../../mini-bot
       dockerfile: Dockerfile
     depends_on:
       collector:

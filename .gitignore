@@ -2,10 +2,13 @@
 /mini-bot/target
 
 # collector (Go)
-/collector/collector
-/collector/vpsm-collector
+/resources/collector/collector
+/resources/collector/vpsm-collector
 
 # collector runtime state (SQLite, plus its WAL sidecar files)
 vpsm.db
 vpsm.db-shm
 vpsm.db-wal
+
+# logs viewer (Go)
+/logs/viewer/vpsm-logs

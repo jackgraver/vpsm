@@ -3,7 +3,7 @@
 The VPSM monitoring agent. Deployed onto each VPS being watched; samples
 local system usage (CPU, memory, disk, network, and per-process usage) on an
 interval into an on-disk spool, which the collector pulls over SSH (see
-`../collector/CLAUDE.md`).
+`../resources/collector/CLAUDE.md`).
 
 ## Why Rust
 
@@ -164,8 +164,8 @@ at 3 ms.
 
 Sampling, self-measurement, serialisation, the spool and `export` are built
 and covered by tests. The agent has no network code and should not grow
-any: the collector pulls. The transport is described in the root
-`CLAUDE.md` and in `../collector/internal/protocol/pull.go`, which is
+any: the collector pulls. The transport is described in
+`../resources/CLAUDE.md` and in `../resources/collector/internal/protocol/pull.go`, which is
 authoritative.
 
 ## Modes
@@ -207,7 +207,7 @@ before changing it:
 
 ## Wire format notes
 
-Field names follow `../collector/internal/protocol/protocol.go`, not this
+Field names follow `../resources/collector/internal/protocol/protocol.go`, not this
 crate's internal naming (`filesystems`/`mount_point`/`fs_type`, `cpu.ticks`
 rather than percentages). The rules from the protocol that this side
 enforces:
@@ -238,4 +238,4 @@ It is idempotent: it upgrades the binary and unit and keeps an existing
 
 Note that an agent inside a container reads the *host's* `/proc/stat` and
 `/proc/meminfo` but only its own PID namespace, so host gauges and the
-process list describe different things. See `../e2e/README.md`.
+process list describe different things. See `../resources/e2e/README.md`.

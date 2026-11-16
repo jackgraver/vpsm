@@ -13,7 +13,7 @@ rejection carries a code an agent can branch on, and that a `null` is still a
 ## Read this first: this harness covers HTTP ingest only
 
 Since this was written the agent and collector moved to pull over SSH (see
-the root `CLAUDE.md`); the agent no longer pushes at all, so the stand-in
+`../CLAUDE.md`); the agent no longer pushes at all, so the stand-in
 below is the only HTTP sender there will be. The pull path shares
 validation and storage with HTTP ingest and is covered by
 `collector/internal/pull` tests. The original note follows.
@@ -21,7 +21,7 @@ validation and storage with HTTP ingest and is covered by
 ### The agent cannot report over HTTP
 
 `mini-bot` has no HTTP client, no serialisation and no buffering — see
-`../mini-bot/CLAUDE.md`. It reads `VPSM_COLLECTOR_URL`, logs that reporting
+`../../mini-bot/CLAUDE.md`. It reads `VPSM_COLLECTOR_URL`, logs that reporting
 isn't built, and samples locally. So the agent→collector leg cannot be tested
 with the real agent today, and this harness does the next best thing:
 

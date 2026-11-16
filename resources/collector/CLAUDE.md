@@ -1,7 +1,7 @@
 # collector
 
 The VPSM collector. Pulls usage reports from every `mini-bot` agent over
-SSH (see `../mini-bot/CLAUDE.md`), or receives them over HTTP, stores them,
+SSH (see `../../mini-bot/CLAUDE.md`), or receives them over HTTP, stores them,
 and renders them for review in the terminal.
 
 It does not need to run all the time: agents spool until it next pulls.
