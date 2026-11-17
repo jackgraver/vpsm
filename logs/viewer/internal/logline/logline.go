@@ -53,6 +53,10 @@ type Entry struct {
 	// Continuation marks a line whose level and time were inherited from
 	// the line before it.
 	Continuation bool
+	// Noise marks a health check or local probe: a request to /health and
+	// friends, or a GET from the container's own loopback. Hidden unless
+	// asked for, since a service probed every 10s drowns its real traffic.
+	Noise bool
 }
 
 // Parser parses the lines of one source in order. It is stateful: Docker
@@ -102,7 +106,7 @@ func (p *Parser) Next(raw string) (Entry, bool) {
 	}
 
 	text = Clean(text)
-	e := Entry{Source: p.Source, Line: p.line, Text: text, Stream: w.stream, Origin: w.origin}
+	e := Entry{Source: p.Source, Line: p.line, Text: text, Stream: w.stream, Origin: w.origin, Noise: IsProbe(text)}
 	e.Level, e.Time = p.detect(text)
 	ownTime := !e.Time.IsZero()
 

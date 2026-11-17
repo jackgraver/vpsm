@@ -259,3 +259,45 @@ func TestUnrecognisedCursorLineIsPlainJSON(t *testing.T) {
 		t.Errorf("entry = %+v", e)
 	}
 }
+
+func TestIsProbe(t *testing.T) {
+	cases := []struct {
+		line string
+		want bool
+	}{
+		{`[GIN] 2026/11/16 - 21:13:06 | 200 |    1.358552ms |       127.0.0.1 | GET      "/health"`, true},
+		{`127.0.0.1 - - [17/Nov/2026:03:13:51 +0000] "GET / HTTP/1.1" 200 1438 "-" "Wget"`, true},
+		{`10.0.0.5 - - [17/Nov/2026:03:13:51 +0000] "GET /healthz HTTP/1.1" 200 2 "-" "kube-probe"`, true},
+		{`[GIN] 2026/11/16 - 21:12:45 | 200 |  83.1ms |      172.18.0.1 | POST     "/auth/login"`, false},
+		{`172.18.0.1 - - [17/Nov/2026:03:12:45 +0000] "GET /assets/gym.js HTTP/1.1" 200 7521 "-" "Mozilla"`, false},
+		{`[GIN] 2026/11/16 - 21:12:45 | 200 |  5ms |      172.18.0.1 | GET      "/healthy-recipes"`, false},
+		{`time="..." level=error msg="healthcheck failed for container"`, false},
+		{`INFO health insurance quote requested`, false},
+	}
+	for _, c := range cases {
+		if got := IsProbe(c.line); got != c.want {
+			t.Errorf("IsProbe(%q) = %v, want %v", c.line, got, c.want)
+		}
+	}
+}
+
+func TestGinRequestLines(t *testing.T) {
+	p := &Parser{}
+	lines := []string{
+		`{"cursor":"1","src":"backend","msg":"2026/11/16 21:12:45 INFO authentication login attempt"}`,
+		`{"cursor":"2","src":"backend","msg":"[GIN] 2026/11/16 - 21:12:45 | 200 |   83.1ms |  172.18.0.1 | POST     \"/auth/login\""}`,
+		`{"cursor":"3","src":"backend","msg":"[GIN] 2026/11/16 - 21:12:42 | 401 |   24.6µs |  172.18.0.1 | GET      \"/auth/me\""}`,
+		`{"cursor":"4","src":"backend","msg":"[GIN] 2026/11/16 - 21:12:46 | 502 |   1.2ms |  172.18.0.1 | GET      \"/money\""}`,
+	}
+	want := []Level{LevelInfo, LevelInfo, LevelWarn, LevelError}
+	for i, l := range lines {
+		e, _ := p.Next(l)
+		if e.Level != want[i] || e.Continuation {
+			t.Errorf("line %d: level %v continuation %v, want %v and its own entry", i+1, e.Level, e.Continuation, want[i])
+		}
+	}
+	e := parseOne(t, `[GIN] 2026/11/16 - 21:12:45 | 200 | 1ms | 1.2.3.4 | GET "/x"`)
+	if want := time.Date(2026, 11, 16, 21, 12, 45, 0, time.Local); !e.Time.Equal(want) {
+		t.Errorf("time = %v, want %v", e.Time, want)
+	}
+}

@@ -7,13 +7,22 @@ finding what matters in them.
 
 `viewer/` is a Go program, `vpsm-logs`, that reads log files or stdin and
 shows them in a Bubble Tea TUI with live search. On the VPS,
-`mini-bot logs` reads the journal and emits one JSON line per entry, so the
-two already work together over SSH:
+`mini-bot logs` reads the journal and emits one JSON line per entry, and
+the viewer runs it over SSH itself:
 
 ```
-ssh host mini-bot logs --since -1h | vpsm-logs
-ssh host mini-bot logs --source web --source caddy | vpsm-logs -level warn
+vpsm-logs -ssh st-vps                              last hour, then live
+vpsm-logs -ssh st-vps -since -6h -source backend -level warn
+vpsm-logs -ssh st-vps -print -q timeout            grep-style, no follow
 ```
+
+**Use `-ssh` rather than piping from ssh.** In `ssh host mini-bot logs |
+vpsm-logs` both programs read the terminal: ssh forwards keystrokes to the
+remote command, and each key goes to whichever reads first, so keys meant
+for the viewer vanish. `-ssh` runs ssh with stdin on /dev/null, holds its
+stderr until the viewer exits (so an auth error does not scribble over
+the screen), and kills it on quit rather than leaving it until the next
+line arrives. `ssh -n` makes the pipe form work if you need it.
 
 Not built yet: `vpsm-logs pull <host>` keeping a local cache and the last
 cursor, so repeated pulls fetch only what is new (see Next).
@@ -27,7 +36,10 @@ larger, so copying them into a mini-bot spool would store everything twice
 and compete with the workload for disk I/O.
 
 - **Docker uses the journald log driver** (`mini-bot/deploy/docker-daemon.json`,
-  `tag` set to the container name). Everything on the target VPS except
+  `tag` set to the container name, and the compose project and service
+  labels copied into each entry, so `src` is `backend` rather than
+  `simple-track-backend-1`; containers created before that setting keep
+  their full name). Everything on the target VPS except
   Caddy is Docker; Caddy is a systemd unit and logs to the journal
   natively. `docker logs` keeps working with this driver.
 - **journald is capped at 2G and 30 days, persistent, with no rate limit**
@@ -56,7 +68,7 @@ One JSON object per line. Written by `../mini-bot/src/logs.rs`, read by
 |---|---|
 | `cursor` | journald's, opaque. Pass it back as `--after-cursor` to resume. |
 | `t` | microseconds since the epoch, when journald received it |
-| `src` | container name, else systemd service without `.service`, else syslog identifier, else command |
+| `src` | compose service, else container name, else systemd service without `.service`, else syslog identifier, else command |
 | `stream` | `stdout`/`stderr`, containers only |
 | `pri` | syslog priority 0–7, **only when the program chose it** |
 | `msg` | the message; Docker's 16 KiB partial lines rejoined |
@@ -85,9 +97,15 @@ vpsm-logs [-q search] [-level warn] [-print] [path ...]
 - When stdout is not a terminal (or with `-print`) the matching lines are
   printed instead, so the same flags work in a pipeline.
 
-Keys: `/` search (live, as you type), `l`/`L` step the minimum level,
-`esc` removes the search and then the level, `enter` shows one line in full
-(JSON pretty-printed), `g`/`G` top/bottom, `q` quit.
+Keys: `/` search (live, as you type), `l`/`L` step the minimum level, `h`
+show/hide health checks, `esc` removes the search and then the level,
+`enter` shows one line in full (JSON pretty-printed), `g`/`G` top/bottom,
+`q` quit.
+
+**Live.** Stdin alone is read as it arrives, never to the end first, since
+`--follow` never ends. Lines are parsed and filtered as they come, only the
+new ones; the view follows while the cursor is on the newest line and
+stays put once you scroll up. The header says `● live`, then `ended`.
 
 ## Layout
 
@@ -131,7 +149,18 @@ Keys: `/` search (live, as you type), `l`/`L` step the minimum level,
   be padded with unclassified noise; `esc` brings them back.
 - **Search is a smart-case substring**, as in ripgrep and vim: lowercase
   ignores case, any uppercase makes it exact. Not a regex, on purpose, for
-  v1.
+  v1. **It also matches the source name**, so `backend` finds everything the
+  backend logged, which rarely says "backend" in its own text.
+- **Health checks are hidden by default** (`h`, or `-health`). A container
+  probed every 10s buries its real traffic. A probe is a request to
+  `/health`, `/healthz`, `/ready`, `/livez`, `/ping` and similar, or a GET
+  from loopback: inside a container real traffic arrives from the bridge
+  through the reverse proxy, so loopback is the HEALTHCHECK. The header
+  counts what is hidden.
+- **Gin request lines** (`[GIN] 2026/11/16 - 21:12:45 | 401 | ...`) are
+  graded by status like access logs and their timestamp is read. Without
+  that, a Gin line following a timestamped slog line was taken for its
+  continuation and inherited its level.
 - **Everything is loaded into memory.** Fine for the logs one VPS keeps;
   lines over 1 MiB are cut, not dropped.
 

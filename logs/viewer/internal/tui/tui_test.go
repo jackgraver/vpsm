@@ -133,7 +133,7 @@ func TestLevelCycleAndEscPeelsFilters(t *testing.T) {
 		t.Errorf("first esc should drop the search only: %+v", m.filter)
 	}
 	press(m, "esc")
-	if m.filter.Active() {
+	if m.filter.Query != "" || m.filter.MinLevel != logline.LevelUnknown {
 		t.Errorf("second esc should drop the level: %+v", m.filter)
 	}
 	press(m, "L")
@@ -214,4 +214,87 @@ func stripANSI(s string) string {
 		}
 	}
 	return b.String()
+}
+
+func newLiveModel(t *testing.T) (*model, chan string) {
+	t.Helper()
+	ch := make(chan string, 100)
+	m := newModel(Options{Set: &load.Set{}, Live: ch, LiveName: "stdin"})
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 8})
+	return m, ch
+}
+
+// deliver runs the wait command the way Bubble Tea would, and applies the
+// batch it returns.
+func deliver(m *model, ch chan string, lines ...string) {
+	for _, l := range lines {
+		ch <- l
+	}
+	m.Update(waitLines(ch)())
+}
+
+func TestLiveLinesArriveAndFollow(t *testing.T) {
+	m, ch := newLiveModel(t)
+	if cmd := m.Init(); cmd == nil {
+		t.Fatal("live model should start waiting for lines")
+	}
+	if !strings.Contains(m.View(), "Waiting for lines") || !strings.Contains(m.View(), "● live") {
+		t.Errorf("empty live view:\n%s", m.View())
+	}
+	deliver(m, ch, "INFO one", "INFO two")
+	if selectedText(m) != "INFO two" {
+		t.Errorf("selected = %q, want the newest", selectedText(m))
+	}
+	deliver(m, ch, "INFO three")
+	if selectedText(m) != "INFO three" {
+		t.Errorf("at the bottom, the view should follow: selected = %q", selectedText(m))
+	}
+	press(m, "k")
+	deliver(m, ch, "INFO four")
+	if selectedText(m) != "INFO two" {
+		t.Errorf("scrolled up, the cursor should stay: selected = %q", selectedText(m))
+	}
+	close(ch)
+	m.Update(waitLines(ch)())
+	if m.live || !strings.Contains(m.View(), "ended") {
+		t.Errorf("closed input should read as ended:\n%s", m.View())
+	}
+}
+
+func TestLiveLinesRespectTheFilter(t *testing.T) {
+	m, ch := newLiveModel(t)
+	press(m, "/", "e", "r", "r", "enter")
+	deliver(m, ch, "INFO fine", "ERROR bad", "INFO fine again")
+	if len(m.visible) != 1 || selectedText(m) != "ERROR bad" {
+		t.Errorf("visible = %d, selected %q", len(m.visible), selectedText(m))
+	}
+}
+
+func TestLiveJournalLinesGetServiceLabels(t *testing.T) {
+	m, ch := newLiveModel(t)
+	deliver(m, ch,
+		`{"cursor":"1","t":1794823200000000,"src":"backend","msg":"INFO a"}`,
+		`{"cursor":"2","t":1794823201000000,"src":"caddy","msg":"INFO b"}`)
+	view := m.View()
+	if !strings.Contains(view, "backend") || !strings.Contains(view, "caddy") || !strings.Contains(view, "2 sources") {
+		t.Errorf("labels missing:\n%s", view)
+	}
+}
+
+func TestHealthChecksToggle(t *testing.T) {
+	m := newTestModel(t,
+		`[GIN] | 200 | 1ms | 127.0.0.1 | GET "/health"`,
+		`[GIN] | 200 | 9ms | 172.18.0.1 | GET "/money/accounts"`,
+		`[GIN] | 200 | 1ms | 127.0.0.1 | GET "/health"`)
+	if len(m.visible) != 1 || !strings.Contains(m.View(), "2 health checks hidden") {
+		t.Fatalf("visible = %d, want probes hidden by default:\n%s", len(m.visible), m.View())
+	}
+	press(m, "h")
+	if len(m.visible) != 3 || strings.Contains(m.View(), "hidden") {
+		t.Errorf("h should show them: visible = %d", len(m.visible))
+	}
+	press(m, "h")
+	if len(m.visible) != 1 {
+		t.Errorf("h again should hide them: visible = %d", len(m.visible))
+	}
 }

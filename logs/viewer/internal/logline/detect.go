@@ -96,6 +96,11 @@ var (
 	reKVTime  = regexp.MustCompile(`\b(?:ts|time|timestamp)=("?)([^"\s]+(?: [0-9:.]+)?)`)
 	// The request and status of an HTTP access log (combined/common format).
 	reAccessStatus = regexp.MustCompile(`"[A-Z]+ \S+ HTTP/[0-9.]+" ([1-5][0-9]{2}) `)
+	// Gin's request log: `[GIN] 2026/11/16 - 21:12:45 | 200 | 83ms | ...`.
+	// Its timestamp is not at the start and not ISO, so it needs its own
+	// pattern; without it, a Gin line after a timestamped one reads as that
+	// line's continuation.
+	reGin = regexp.MustCompile(`^\[GIN\] (\d{4}/\d{2}/\d{2} - \d{2}:\d{2}:\d{2}) \|\s*([1-5][0-9]{2}) \|`)
 
 	// Timestamps at the start of a line, optionally bracketed.
 	reISOPrefix    = regexp.MustCompile(`^\[?(\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z| ?[+-]\d{2}:?\d{2})?)`)
@@ -125,21 +130,19 @@ func (p *Parser) fromText(text string) (Level, time.Time) {
 			lvl = ParseLevel(m[1])
 		}
 	}
+	gin := reGin.FindStringSubmatch(text)
 	if lvl == LevelUnknown {
-		if m := reAccessStatus.FindStringSubmatch(text); m != nil {
-			switch m[1][0] {
-			case '5':
-				lvl = LevelError
-			case '4':
-				lvl = LevelWarn
-			default:
-				lvl = LevelInfo
-			}
+		if gin != nil {
+			lvl = statusLevel(gin[2])
+		} else if m := reAccessStatus.FindStringSubmatch(text); m != nil {
+			lvl = statusLevel(m[1])
 		}
 	}
 
 	var t time.Time
 	switch {
+	case gin != nil:
+		t, _ = time.ParseInLocation("2006/01/02 - 15:04:05", gin[1], time.Local)
 	case reISOPrefix.MatchString(text):
 		t = p.parseTime(reISOPrefix.FindStringSubmatch(text)[1])
 	case reSyslogPrefix.MatchString(text):
@@ -152,6 +155,17 @@ func (p *Parser) fromText(text string) (Level, time.Time) {
 		}
 	}
 	return lvl, t
+}
+
+// statusLevel grades an HTTP status: 5xx error, 4xx warn, else info.
+func statusLevel(code string) Level {
+	switch code[0] {
+	case '5':
+		return LevelError
+	case '4':
+		return LevelWarn
+	}
+	return LevelInfo
 }
 
 // isoLayouts are tried in order on a normalised timestamp: '/' date
@@ -204,4 +218,20 @@ func (p *Parser) parseSyslog(s string) time.Time {
 		t = t.AddDate(-1, 0, 0)
 	}
 	return t
+}
+
+var (
+	// A request for a health endpoint, as access logs and GIN print it:
+	// `"GET /health HTTP/1.1"`, `GET      "/healthz"`.
+	reHealthPath = regexp.MustCompile(`(?:GET|HEAD)\s+"?/(?:health|healthz|healthcheck|ready|readyz|live|livez|ping)(?:[/?"\s]|$)`)
+	// A request from loopback. Inside a container, real traffic arrives from
+	// the bridge (172.x) through the reverse proxy; loopback is the
+	// container's own HEALTHCHECK probing itself.
+	reLoopbackRequest = regexp.MustCompile(`(?:^(?:127\.0\.0\.1|::1) - \S+ \[.*"(?:GET|HEAD) |\|\s+(?:127\.0\.0\.1|::1)\s+\|\s+(?:GET|HEAD)\s)`)
+)
+
+// IsProbe reports whether a line is a health check or a local probe rather
+// than real traffic.
+func IsProbe(text string) bool {
+	return reHealthPath.MatchString(text) || reLoopbackRequest.MatchString(text)
 }

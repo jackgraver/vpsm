@@ -28,9 +28,66 @@ const StdinName = "-"
 
 // Set is everything loaded: the source names, and the entries from all of
 // them in display order. Entry.Source indexes Sources.
+//
+// A source is a file, or a service named inside one: lines pulled from a
+// VPS journal each say which service wrote them, and are filed under it.
+// Sources are created as the first entry for them arrives, so a pulled
+// journal file never appears as an empty source of its own.
 type Set struct {
 	Sources []string
 	Entries []logline.Entry
+	index   map[string]int
+}
+
+// intern returns the index of the named source, adding it if new.
+func (s *Set) intern(name string) int {
+	if s.index == nil {
+		s.index = map[string]int{}
+	}
+	i, ok := s.index[name]
+	if !ok {
+		i = len(s.Sources)
+		s.Sources = append(s.Sources, name)
+		s.index[name] = i
+	}
+	return i
+}
+
+// Stream parses one input's lines, in order, into its Set. It is how both
+// a whole file and a live pipe are read: Load feeds a file through one,
+// and the viewer feeds stdin through one as lines arrive.
+type Stream struct {
+	set    *Set
+	name   string
+	parser *logline.Parser
+}
+
+// NewStream starts reading an input called name into s.
+func (s *Set) NewStream(name string) *Stream {
+	return &Stream{set: s, name: name, parser: &logline.Parser{Now: time.Now()}}
+}
+
+// Add parses one line, appending the entry it completes, if any.
+func (st *Stream) Add(line string) {
+	if e, ok := st.parser.Next(line); ok {
+		st.append(e)
+	}
+}
+
+// Flush appends a final partial line the input ended on.
+func (st *Stream) Flush() {
+	if e, ok := st.parser.Flush(); ok {
+		st.append(e)
+	}
+}
+
+func (st *Stream) append(e logline.Entry) {
+	name := st.name
+	if e.Origin != "" {
+		name = e.Origin
+	}
+	e.Source = st.set.intern(name)
+	st.set.Entries = append(st.set.Entries, e)
 }
 
 // maxLine caps one line's length. Longer lines are cut, not dropped, so a
@@ -45,8 +102,6 @@ func Load(paths []string, stdin io.Reader) (*Set, error) {
 		return nil, err
 	}
 	set := &Set{}
-	now := time.Now()
-	origins := map[string]int{}
 	for _, path := range files {
 		r, closeFn, err := open(path, stdin)
 		if err != nil {
@@ -56,66 +111,18 @@ func Load(paths []string, stdin io.Reader) (*Set, error) {
 		if path == StdinName {
 			name = "stdin"
 		}
-		p := &logline.Parser{Source: len(set.Sources), Now: now}
-		set.Sources = append(set.Sources, name)
-		err = readLines(r, func(line string) {
-			if e, ok := p.Next(line); ok {
-				set.Entries = append(set.Entries, set.file(e, origins))
-			}
-		})
+		st := set.NewStream(name)
+		err = ReadLines(r, st.Add)
 		closeFn()
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", name, err)
 		}
-		if e, ok := p.Flush(); ok {
-			set.Entries = append(set.Entries, set.file(e, origins))
-		}
+		st.Flush()
 	}
-	set.dropEmpty()
-	if len(set.Sources) > 1 {
+	if len(set.Sources) > 1 && len(files) > 1 {
 		interleave(set.Entries)
 	}
 	return set, nil
-}
-
-// file files an entry that names its own origin (a service, in a journal
-// pulled from a VPS) under that name rather than under the file it came in.
-func (s *Set) file(e logline.Entry, origins map[string]int) logline.Entry {
-	if e.Origin == "" {
-		return e
-	}
-	i, ok := origins[e.Origin]
-	if !ok {
-		i = len(s.Sources)
-		s.Sources = append(s.Sources, e.Origin)
-		origins[e.Origin] = i
-	}
-	e.Source = i
-	return e
-}
-
-// dropEmpty removes sources left with no entries — a pulled journal file,
-// once its lines are filed under their services — and renumbers the rest.
-func (s *Set) dropEmpty() {
-	used := make([]bool, len(s.Sources))
-	for _, e := range s.Entries {
-		used[e.Source] = true
-	}
-	remap := make([]int, len(s.Sources))
-	var kept []string
-	for i, name := range s.Sources {
-		if used[i] {
-			remap[i] = len(kept)
-			kept = append(kept, name)
-		}
-	}
-	if len(kept) == len(s.Sources) || len(kept) == 0 {
-		return
-	}
-	for i := range s.Entries {
-		s.Entries[i].Source = remap[s.Entries[i].Source]
-	}
-	s.Sources = kept
 }
 
 // expand turns directories into the regular files directly inside them,
@@ -196,8 +203,15 @@ func open(path string, stdin io.Reader) (io.Reader, func(), error) {
 	return br, func() { f.Close() }, nil
 }
 
-// readLines calls fn for each line of r, without its line ending.
-func readLines(r io.Reader, fn func(string)) error {
+// ReadLines calls fn for each line of r, without its line ending, as each
+// arrives: on a pipe it does not wait for the end of the input.
+func ReadLines(r io.Reader, fn func(string)) error {
+	return ScanLines(r, func(line string) error { fn(line); return nil })
+}
+
+// ScanLines is ReadLines stopping at the first error fn returns, which it
+// returns: a reader of a never-ending pipe has to be able to give up.
+func ScanLines(r io.Reader, fn func(string) error) error {
 	br := bufio.NewReaderSize(r, 64<<10)
 	var long []byte
 	for {
@@ -217,7 +231,9 @@ func readLines(r io.Reader, fn func(string)) error {
 				line, long = long, nil
 			}
 			s := strings.TrimRight(string(line), "\r\n")
-			fn(s)
+			if err := fn(s); err != nil {
+				return err
+			}
 		}
 		if err == io.EOF {
 			return nil

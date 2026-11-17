@@ -5,6 +5,10 @@
 // filter; changing the filter recomputes that list and keeps the cursor on
 // the same line, or the nearest one after it, so narrowing a search never
 // throws away where you were looking.
+//
+// Given a live input (stdin from `mini-bot logs --follow`), lines are
+// parsed and filtered as they arrive. The view follows them while the
+// cursor is on the newest line, and stays put once you scroll up.
 package tui
 
 import (
@@ -33,6 +37,11 @@ type Options struct {
 	// TTYInput reads keys from /dev/tty rather than stdin, for when stdin
 	// is the log being viewed.
 	TTYInput bool
+	// Live, when set, delivers lines of an input still being read, named
+	// LiveName; it is closed at the end of the input. Its entries are added
+	// to Set as they arrive.
+	Live     <-chan string
+	LiveName string
 }
 
 // Run shows the viewer until the user quits.
@@ -66,24 +75,111 @@ type model struct {
 	labels []string // short per-source name, when there is more than one
 	labelW int
 
+	stream *load.Stream // the live input, while there is one
+	live   bool         // still receiving
+	probes int          // entries marked as noise, for the header
+
 	width, height int
 }
 
 func newModel(opts Options) *model {
 	m := &model{opts: opts, set: opts.Set, filter: opts.Filter}
-	if len(m.set.Sources) > 1 {
-		m.labels = shortNames(m.set.Sources)
-		for _, l := range m.labels {
-			m.labelW = max(m.labelW, runewidth.StringWidth(l))
-		}
+	if opts.Live != nil {
+		m.stream, m.live = m.set.NewStream(opts.LiveName), true
 	}
+	m.countProbes(0)
+	m.updateLabels()
 	m.refilter()
 	// Start at the newest line, as tail does.
 	m.cursor = max(0, len(m.visible)-1)
 	return m
 }
 
-func (m *model) Init() tea.Cmd { return nil }
+func (m *model) Init() tea.Cmd {
+	if m.live {
+		return waitLines(m.opts.Live)
+	}
+	return nil
+}
+
+// linesMsg is a batch of lines from the live input; done means the input
+// ended after them.
+type linesMsg struct {
+	lines []string
+	done  bool
+}
+
+// maxBatch bounds how many lines are taken per update, so a large backlog
+// arriving at once still lets the screen redraw as it loads.
+const maxBatch = 5000
+
+// waitLines blocks for the next line, then takes whatever else is already
+// waiting, so a burst costs one redraw rather than one per line.
+func waitLines(ch <-chan string) tea.Cmd {
+	return func() tea.Msg {
+		line, ok := <-ch
+		if !ok {
+			return linesMsg{done: true}
+		}
+		batch := []string{line}
+		for len(batch) < maxBatch {
+			select {
+			case line, ok := <-ch:
+				if !ok {
+					return linesMsg{lines: batch, done: true}
+				}
+				batch = append(batch, line)
+			default:
+				return linesMsg{lines: batch}
+			}
+		}
+		return linesMsg{lines: batch}
+	}
+}
+
+// addLines appends live lines, filtering only the new entries, and keeps
+// following if the cursor was on the newest line.
+func (m *model) addLines(msg linesMsg) tea.Cmd {
+	following := m.cursor >= len(m.visible)-1
+	start := len(m.set.Entries)
+	for _, line := range msg.lines {
+		m.stream.Add(line)
+	}
+	if msg.done {
+		m.stream.Flush()
+		m.live = false
+	}
+	m.countProbes(start)
+	m.updateLabels()
+	m.visible = m.filter.ApplyFrom(m.set.Entries, m.set.Sources, start, m.visible)
+	if following {
+		m.cursor = max(0, len(m.visible)-1)
+	}
+	if msg.done {
+		return nil
+	}
+	return waitLines(m.opts.Live)
+}
+
+func (m *model) countProbes(from int) {
+	for i := from; i < len(m.set.Entries); i++ {
+		if m.set.Entries[i].Noise {
+			m.probes++
+		}
+	}
+}
+
+// updateLabels recomputes the per-source labels when sources were added.
+func (m *model) updateLabels() {
+	if len(m.set.Sources) < 2 || len(m.labels) == len(m.set.Sources) {
+		return
+	}
+	m.labels = shortNames(m.set.Sources)
+	m.labelW = 0
+	for _, l := range m.labels {
+		m.labelW = max(m.labelW, runewidth.StringWidth(l))
+	}
+}
 
 // refilter recomputes the visible lines, keeping the cursor on the entry
 // it was on, or else the first visible one after it.
@@ -92,7 +188,7 @@ func (m *model) refilter() {
 	if m.cursor >= 0 && m.cursor < len(m.visible) {
 		anchor = m.visible[m.cursor]
 	}
-	m.visible = m.filter.Apply(m.set.Entries)
+	m.visible = m.filter.Apply(m.set.Entries, m.set.Sources)
 	if anchor < 0 {
 		m.cursor = 0
 		return
@@ -112,6 +208,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+	case linesMsg:
+		return m, m.addLines(msg)
 	case tea.KeyMsg:
 		return m, m.handleKey(msg)
 	}
@@ -169,6 +267,9 @@ func (m *model) handleListKey(key string) tea.Cmd {
 		m.move(1 << 30)
 	case "/":
 		m.editing = true
+	case "h":
+		m.filter.ShowNoise = !m.filter.ShowNoise
+		m.refilter()
 	case "l":
 		m.stepLevel(1)
 	case "L":
@@ -278,6 +379,7 @@ var (
 	styleMatch  = lipgloss.NewStyle().Background(lipgloss.Color("3")).Foreground(lipgloss.Color("0"))
 	styleErr    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 	styleInput  = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	styleLive   = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
 
 	levelStyles = map[logline.Level]lipgloss.Style{
 		logline.LevelTrace: styleDim,
@@ -317,15 +419,27 @@ func (m *model) viewHeader() string {
 	if m.opts.Version != "" {
 		left += styleDim.Render(" " + m.opts.Version)
 	}
-	src := m.set.Sources[0]
-	if n := len(m.set.Sources); n > 1 {
+	src := ""
+	switch n := len(m.set.Sources); {
+	case n == 1:
+		src = m.set.Sources[0]
+	case n > 1:
 		src = fmt.Sprintf("%d sources", n)
 	}
 	left += styleDim.Render("  " + src)
 
 	right := fmt.Sprintf("%s lines", commas(len(m.set.Entries)))
-	if m.filter.Active() {
+	if len(m.visible) != len(m.set.Entries) {
 		right = fmt.Sprintf("%s of %s", commas(len(m.visible)), right)
+	}
+	if m.probes > 0 && !m.filter.ShowNoise {
+		right = styleDim.Render(fmt.Sprintf("%s health checks hidden  ", commas(m.probes))) + right
+	}
+	switch {
+	case m.live:
+		right += styleLive.Render("  ● live")
+	case m.stream != nil:
+		right += styleDim.Render("  ended")
 	}
 	if m.filter.MinLevel != logline.LevelUnknown {
 		right = levelStyles[m.filter.MinLevel].Render("≥"+m.filter.MinLevel.String()) + "  " + right
@@ -355,7 +469,7 @@ func (m *model) viewFooter() string {
 	case m.detail:
 		keys = "↑↓/pgup/pgdn scroll · esc back"
 	default:
-		keys = "↑↓/pgup/pgdn move · g/G top/bottom · / search · l/L level · esc clear · enter detail · q quit"
+		keys = "↑↓/pgup/pgdn move · g/G top/bottom · / search · l/L level · h health checks · esc clear · enter detail · q quit"
 	}
 	return truncateStyled(line, m.width) + "\n" + styleDim.Render(runewidth.Truncate(keys, m.width, "…"))
 }
@@ -363,6 +477,9 @@ func (m *model) viewFooter() string {
 func (m *model) viewList() []string {
 	rows := m.rows()
 	if len(m.set.Entries) == 0 {
+		if m.live {
+			return []string{styleDim.Render("Waiting for lines…")}
+		}
 		return []string{styleDim.Render("(no lines)")}
 	}
 	if len(m.visible) == 0 {
