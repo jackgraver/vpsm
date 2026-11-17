@@ -46,6 +46,7 @@ func Load(paths []string, stdin io.Reader) (*Set, error) {
 	}
 	set := &Set{}
 	now := time.Now()
+	origins := map[string]int{}
 	for _, path := range files {
 		r, closeFn, err := open(path, stdin)
 		if err != nil {
@@ -59,7 +60,7 @@ func Load(paths []string, stdin io.Reader) (*Set, error) {
 		set.Sources = append(set.Sources, name)
 		err = readLines(r, func(line string) {
 			if e, ok := p.Next(line); ok {
-				set.Entries = append(set.Entries, e)
+				set.Entries = append(set.Entries, set.file(e, origins))
 			}
 		})
 		closeFn()
@@ -67,13 +68,54 @@ func Load(paths []string, stdin io.Reader) (*Set, error) {
 			return nil, fmt.Errorf("reading %s: %w", name, err)
 		}
 		if e, ok := p.Flush(); ok {
-			set.Entries = append(set.Entries, e)
+			set.Entries = append(set.Entries, set.file(e, origins))
 		}
 	}
+	set.dropEmpty()
 	if len(set.Sources) > 1 {
 		interleave(set.Entries)
 	}
 	return set, nil
+}
+
+// file files an entry that names its own origin (a service, in a journal
+// pulled from a VPS) under that name rather than under the file it came in.
+func (s *Set) file(e logline.Entry, origins map[string]int) logline.Entry {
+	if e.Origin == "" {
+		return e
+	}
+	i, ok := origins[e.Origin]
+	if !ok {
+		i = len(s.Sources)
+		s.Sources = append(s.Sources, e.Origin)
+		origins[e.Origin] = i
+	}
+	e.Source = i
+	return e
+}
+
+// dropEmpty removes sources left with no entries — a pulled journal file,
+// once its lines are filed under their services — and renumbers the rest.
+func (s *Set) dropEmpty() {
+	used := make([]bool, len(s.Sources))
+	for _, e := range s.Entries {
+		used[e.Source] = true
+	}
+	remap := make([]int, len(s.Sources))
+	var kept []string
+	for i, name := range s.Sources {
+		if used[i] {
+			remap[i] = len(kept)
+			kept = append(kept, name)
+		}
+	}
+	if len(kept) == len(s.Sources) || len(kept) == 0 {
+		return
+	}
+	for i := range s.Entries {
+		s.Entries[i].Source = remap[s.Entries[i].Source]
+	}
+	s.Sources = kept
 }
 
 // expand turns directories into the regular files directly inside them,

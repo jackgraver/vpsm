@@ -198,3 +198,64 @@ func TestCleanStripsEscapesAndControls(t *testing.T) {
 		}
 	}
 }
+
+func TestUnwrapsJournalLines(t *testing.T) {
+	p := &Parser{}
+	e, ok := p.Next(`{"cursor":"s=1","t":1794823200123000,"src":"web","stream":"stderr","msg":"\u001b[33mWARN\u001b[0m slow"}`)
+	if !ok {
+		t.Fatal("no entry")
+	}
+	if e.Text != "2026-11-16T10:00:00.123Z WARN slow" || e.Origin != "web" || e.Stream != "stderr" || e.Level != LevelWarn {
+		t.Errorf("entry = %+v", e)
+	}
+	if want := time.UnixMicro(1794823200123000); !e.Time.Equal(want) {
+		t.Errorf("time = %v, want %v", e.Time, want)
+	}
+}
+
+func TestJournalPriorityIsAFallbackForTheText(t *testing.T) {
+	p := &Parser{}
+	e, _ := p.Next(`{"cursor":"a","src":"sshd","pri":3,"msg":"Connection reset"}`)
+	if e.Level != LevelError {
+		t.Errorf("level = %v, want ERROR from the priority", e.Level)
+	}
+	e, _ = p.Next(`{"cursor":"b","src":"caddy","pri":3,"msg":"{\"level\":\"info\",\"msg\":\"served\"}"}`)
+	if e.Level != LevelInfo {
+		t.Errorf("level = %v, want the text's INFO over the priority", e.Level)
+	}
+}
+
+func TestMultilineJournalMessageStaysOneEntry(t *testing.T) {
+	e := parseOne(t, `{"cursor":"a","src":"app","msg":"first\nsecond\n"}`)
+	if !strings.HasSuffix(e.Text, "first ↵ second") {
+		t.Errorf("text = %q", e.Text)
+	}
+}
+
+func TestContinuationStaysWithinItsService(t *testing.T) {
+	p := &Parser{}
+	lines := []string{
+		`{"cursor":"1","src":"web","msg":"2026-11-16 10:00:00 ERROR boom"}`,
+		`{"cursor":"2","src":"caddy","msg":"2026-11-16 10:00:00 INFO served"}`,
+		`{"cursor":"3","src":"web","msg":"    at handler (app.js:1)"}`,
+		`{"cursor":"4","src":"caddy","msg":"no timestamp here"}`,
+	}
+	var got []Entry
+	for _, l := range lines {
+		e, _ := p.Next(l)
+		got = append(got, e)
+	}
+	if !got[2].Continuation || got[2].Level != LevelError {
+		t.Errorf("web's stack frame = %+v, want it to continue web's ERROR, not caddy's INFO", got[2])
+	}
+	if !got[3].Continuation || got[3].Level != LevelInfo {
+		t.Errorf("caddy's line = %+v, want it to continue caddy's INFO", got[3])
+	}
+}
+
+func TestUnrecognisedCursorLineIsPlainJSON(t *testing.T) {
+	e := parseOne(t, `{"cursor":"x","level":"warn"`) // truncated: not a frame
+	if e.Origin != "" || e.Text != `{"cursor":"x","level":"warn"` {
+		t.Errorf("entry = %+v", e)
+	}
+}

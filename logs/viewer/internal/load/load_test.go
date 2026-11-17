@@ -113,3 +113,25 @@ func TestMissingPathIsAnError(t *testing.T) {
 		t.Error("want an error for an empty directory")
 	}
 }
+
+func TestJournalLinesAreFiledUnderTheirService(t *testing.T) {
+	in := strings.Join([]string{
+		`{"cursor":"1","t":1794823200000000,"src":"web","msg":"a"}`,
+		`{"cursor":"2","t":1794823201000000,"src":"caddy","msg":"b"}`,
+		`{"cursor":"3","t":1794823202000000,"src":"web","msg":"c"}`,
+	}, "\n")
+	set, err := Load([]string{StdinName}, strings.NewReader(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(set.Sources, ","); got != "web,caddy" {
+		t.Errorf("sources = %q, want the services and not stdin", got)
+	}
+	var srcs []string
+	for _, e := range set.Entries {
+		srcs = append(srcs, set.Sources[e.Source])
+	}
+	if got := strings.Join(srcs, ","); got != "web,caddy,web" {
+		t.Errorf("entry sources = %q", got)
+	}
+}

@@ -5,10 +5,73 @@ finding what matters in them.
 
 ## Status
 
-Local only, for now. `viewer/` is a Go program, `vpsm-logs`, that reads log
-files on this machine (or stdin) and shows them in a Bubble Tea TUI with
-live search. Getting logs off each VPS is the next step, and is meant to
-go through `../mini-bot/` the way resource samples do (see below).
+`viewer/` is a Go program, `vpsm-logs`, that reads log files or stdin and
+shows them in a Bubble Tea TUI with live search. On the VPS,
+`mini-bot logs` reads the journal and emits one JSON line per entry, so the
+two already work together over SSH:
+
+```
+ssh host mini-bot logs --since -1h | vpsm-logs
+ssh host mini-bot logs --source web --source caddy | vpsm-logs -level warn
+```
+
+Not built yet: `vpsm-logs pull <host>` keeping a local cache and the last
+cursor, so repeated pulls fetch only what is new (see Next).
+
+## On the VPS: journald is the log store
+
+Decided: logs stay where the host already keeps them, in journald, and
+mini-bot reads them in place. The metrics spool is a backlog that is
+deleted once collected; logs are a history you search later and are far
+larger, so copying them into a mini-bot spool would store everything twice
+and compete with the workload for disk I/O.
+
+- **Docker uses the journald log driver** (`mini-bot/deploy/docker-daemon.json`,
+  `tag` set to the container name). Everything on the target VPS except
+  Caddy is Docker; Caddy is a systemd unit and logs to the journal
+  natively. `docker logs` keeps working with this driver.
+- **journald is capped at 2G and 30 days, persistent, with no rate limit**
+  (`mini-bot/deploy/journald-vpsm.conf`). The VPS has 25 GB.
+- **The pull user is in `systemd-journal`**, which grants reading the
+  journal and nothing else. Reading Docker's json-file logs directly would
+  have needed root or the `docker` group, which is root in all but name.
+- `install.sh` sets up the group and journald. It does not switch Docker's
+  driver: that restarts every container, so it prints the steps instead.
+
+Why journald over reading Docker's json files: a resumable cursor
+(`--after-cursor`) instead of tracking inode + offset across rotations; one
+disk cap for the host; time and per-service filtering done on the VPS; and
+non-Docker services covered by the same path.
+
+## Line format (`mini-bot logs` → viewer)
+
+One JSON object per line. Written by `../mini-bot/src/logs.rs`, read by
+`viewer/internal/logline` (`unwrapJournal`); change both together.
+
+```
+{"cursor":"s=…","t":1763287200123456,"src":"web","stream":"stderr","pri":3,"msg":"…"}
+```
+
+| field | meaning |
+|---|---|
+| `cursor` | journald's, opaque. Pass it back as `--after-cursor` to resume. |
+| `t` | microseconds since the epoch, when journald received it |
+| `src` | container name, else systemd service without `.service`, else syslog identifier, else command |
+| `stream` | `stdout`/`stderr`, containers only |
+| `pri` | syslog priority 0–7, **only when the program chose it** |
+| `msg` | the message; Docker's 16 KiB partial lines rejoined |
+
+`pri` is left out for output journald captured from a stream, because that
+priority is set by stream, not content: Docker marks every stderr line 3
+("error"), and a unit's stdout gets 6 regardless. Many apps log routine
+output to stderr. So the viewer takes the level from the text, and uses
+`pri` only when the text gives none.
+
+In the viewer, each `src` becomes its own source (label, header count,
+`-print` prefix), and continuation lines only continue their own
+service's entries, since a pulled journal interleaves services.
+
+## Using the viewer
 
 ```
 vpsm-logs [-q search] [-level warn] [-print] [path ...]
@@ -52,11 +115,10 @@ Keys: `/` search (live, as you type), `l`/`L` step the minimum level,
   logrus, ECS, journald `-o json`), logfmt, plain-text level words and
   ISO/syslog/CLF timestamps, and HTTP access logs by status (5xx error, 4xx
   warn).
-- **Docker's json-file format is unwrapped**, because that is where a
-  container's stdout ends up on the VPS
-  (`/var/lib/docker/containers/<id>/<id>-json.log`). Its 16 KiB partial
-  lines are rejoined, and its timestamp is put in front of the text as
-  `docker logs -t` does.
+- **Docker's json-file format is unwrapped** too, for logs copied off a
+  host that still uses the default driver. Its 16 KiB partial lines are
+  rejoined, and its timestamp is put in front of the text as `docker logs
+  -t` does — as is journald's for pulled lines.
 - **Plain-text level words must be uppercase or bracketed, and near the
   start** (first 120 bytes). "retrying after error" is message text, not
   the line's level; "ERROR" or "[error]" at the front is.
@@ -75,8 +137,10 @@ Keys: `/` search (live, as you type), `l`/`L` step the minimum level,
 
 ## Next
 
-- Pull from a VPS: a `mini-bot` subcommand that reads the host's log files
-  (or the Docker log directory) and streams them over the same `ssh <host>
-  mini-bot ...` channel the collector uses, so the agent still needs no
-  network code.
-- Follow mode (`tail -f`), and regex search.
+- `vpsm-logs pull <host>`: run `ssh host mini-bot logs --after-cursor C`,
+  append to `~/.local/share/vpsm/logs/<host>/YYYY-MM-DD.jsonl.gz`, store the
+  last cursor; first pull uses `--since`. `vpsm-logs host <host>` opens the
+  cache. The cache files are the line format above, so the viewer already
+  reads them.
+- Remote search for what is older than the cache (`journalctl --grep` via
+  `mini-bot logs`), live follow in the TUI, regex search.

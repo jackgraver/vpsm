@@ -4,6 +4,10 @@
 // Nothing here requires a format to be declared. Every line is kept and
 // displayed as text; the parser only adds what it can recognise:
 //
+//   - Lines from `mini-bot logs` (a VPS's journal) are unwrapped to the
+//     message, filed under the service that wrote it, and stamped with
+//     journald's time; a syslog priority the program set is used when the
+//     text gives no level.
 //   - Docker's json-file wrapper ({"log":..,"stream":..,"time":..}) is
 //     unwrapped, partial lines it split at 16 KiB are rejoined, and its
 //     timestamp is shown in front of the text, as `docker logs -t` does.
@@ -42,6 +46,10 @@ type Entry struct {
 	Time time.Time
 	// Stream is "stdout" or "stderr" when the line came through Docker.
 	Stream string
+	// Origin is the service a line names itself as coming from, when one
+	// stream carries several (a journal pulled from a VPS). Empty for a
+	// plain file, whose name is the source.
+	Origin string
 	// Continuation marks a line whose level and time were inherited from
 	// the line before it.
 	Continuation bool
@@ -55,45 +63,103 @@ type Parser struct {
 	// Now anchors timestamps that omit the year (syslog's "Nov 16 10:00:00").
 	Now time.Time
 
-	line    int
-	prev    Entry
-	hasPrev bool
-	// prevOwnTime is whether the entry before carried (or inherited) a
+	line int
+	// Continuation state per origin: lines pulled from a VPS journal
+	// interleave services, and a line only continues its own service's.
+	chains  map[string]*chain
+	partial strings.Builder
+	partOK  bool
+}
+
+type chain struct {
+	prev Entry
+	// ownTime is whether the entry before carried (or inherited) a
 	// timestamp in its own text. In a log whose lines are timestamped, a
 	// line without one is the tail of the entry above it.
-	prevOwnTime bool
-	partial     strings.Builder
-	partOK      bool
+	ownTime bool
+}
+
+// wrapper is what an envelope around the application's text said: Docker's
+// json-file format, or a line pulled from a VPS by `mini-bot logs`.
+type wrapper struct {
+	stamp    time.Time
+	stream   string
+	origin   string
+	priority Level // LevelUnknown unless the program set one
 }
 
 // Next parses one raw line (without its newline). It returns false when the
 // line produced no entry yet: a Docker partial line waiting for the rest.
 func (p *Parser) Next(raw string) (Entry, bool) {
 	p.line++
-	text, stamp, stream, wrapped := p.unwrapDocker(raw)
-	if wrapped && stamp == nil {
-		return Entry{}, false // partial: held until the final piece arrives
+	text, w, ok := p.unwrapJournal(raw)
+	if !ok {
+		var pending bool
+		text, w, ok, pending = p.unwrapDocker(raw)
+		if pending {
+			return Entry{}, false // held until the final piece arrives
+		}
 	}
 
 	text = Clean(text)
-	e := Entry{Source: p.Source, Line: p.line, Stream: stream, Text: text}
+	e := Entry{Source: p.Source, Line: p.line, Text: text, Stream: w.stream, Origin: w.origin}
 	e.Level, e.Time = p.detect(text)
 	ownTime := !e.Time.IsZero()
 
-	// Judged on the application's own text, before Docker's timestamp is
-	// added: Docker stamps every line, continuation or not.
-	if e.Level == LevelUnknown && !ownTime && p.hasPrev && (p.prevOwnTime || isContinuation(text)) {
-		e.Level, e.Time, e.Continuation = p.prev.Level, p.prev.Time, true
+	if p.chains == nil {
+		p.chains = map[string]*chain{}
 	}
-	if wrapped && !stamp.IsZero() {
+	c, seen := p.chains[e.Origin]
+	// Judged on the application's own text, before the envelope's timestamp
+	// is added: Docker and journald stamp every line, continuation or not.
+	if e.Level == LevelUnknown && !ownTime && seen && (c.ownTime || isContinuation(text)) {
+		e.Level, e.Time, e.Continuation = c.prev.Level, c.prev.Time, true
+	}
+	if e.Level == LevelUnknown {
+		e.Level = w.priority
+	}
+	if ok && !w.stamp.IsZero() {
 		if !ownTime {
-			e.Time = *stamp
+			e.Time = w.stamp
 		}
-		e.Text = stamp.UTC().Format("2006-01-02T15:04:05.000Z") + " " + text
+		e.Text = w.stamp.UTC().Format("2006-01-02T15:04:05.000Z") + " " + text
 	}
-	p.prev, p.hasPrev = e, true
-	p.prevOwnTime = ownTime || (e.Continuation && p.prevOwnTime)
+	if !seen {
+		c = &chain{}
+		p.chains[e.Origin] = c
+	}
+	c.ownTime = ownTime || (e.Continuation && c.ownTime)
+	c.prev = e
 	return e, true
+}
+
+// journalLine is what `mini-bot logs` emits; see mini-bot/src/logs.rs.
+type journalLine struct {
+	Cursor *string `json:"cursor"`
+	T      int64   `json:"t"` // microseconds since the epoch
+	Src    string  `json:"src"`
+	Stream string  `json:"stream"`
+	Pri    *int    `json:"pri"`
+	Msg    string  `json:"msg"`
+}
+
+func (p *Parser) unwrapJournal(raw string) (string, wrapper, bool) {
+	if !strings.HasPrefix(raw, `{"cursor":`) {
+		return raw, wrapper{}, false
+	}
+	var j journalLine
+	if err := json.Unmarshal([]byte(raw), &j); err != nil || j.Cursor == nil {
+		return raw, wrapper{}, false
+	}
+	w := wrapper{stream: j.Stream, origin: j.Src}
+	if j.T > 0 {
+		w.stamp = time.UnixMicro(j.T)
+	}
+	if j.Pri != nil {
+		w.priority = syslogPriority(*j.Pri)
+	}
+	// A journal message can span lines; keep it one entry, visibly.
+	return strings.ReplaceAll(strings.TrimRight(j.Msg, "\n"), "\n", " ↵ "), w, true
 }
 
 // dockerLine is Docker's json-file log driver format.
@@ -103,21 +169,21 @@ type dockerLine struct {
 	Time   string  `json:"time"`
 }
 
-// unwrapDocker recognises Docker's json-file wrapper. wrapped reports
-// whether it was one; stamp is nil while a split line is still incomplete
-// (Docker writes lines over 16 KiB as pieces without a trailing newline).
-func (p *Parser) unwrapDocker(raw string) (text string, stamp *time.Time, stream string, wrapped bool) {
+// unwrapDocker recognises Docker's json-file wrapper. pending reports a
+// split line that is still incomplete (Docker writes lines over 16 KiB as
+// pieces without a trailing newline).
+func (p *Parser) unwrapDocker(raw string) (text string, w wrapper, ok, pending bool) {
 	if !strings.HasPrefix(raw, `{"log":`) {
-		return raw, nil, "", false
+		return raw, w, false, false
 	}
 	var d dockerLine
 	if err := json.Unmarshal([]byte(raw), &d); err != nil || d.Log == nil {
-		return raw, nil, "", false
+		return raw, w, false, false
 	}
 	if !strings.HasSuffix(*d.Log, "\n") {
 		p.partial.WriteString(*d.Log)
 		p.partOK = true
-		return "", nil, d.Stream, true
+		return "", w, true, true
 	}
 	text = strings.TrimSuffix(*d.Log, "\n")
 	if p.partOK {
@@ -126,8 +192,9 @@ func (p *Parser) unwrapDocker(raw string) (text string, stamp *time.Time, stream
 		p.partial.Reset()
 		p.partOK = false
 	}
-	t, _ := time.Parse(time.RFC3339Nano, d.Time)
-	return text, &t, d.Stream, true
+	w.stamp, _ = time.Parse(time.RFC3339Nano, d.Time)
+	w.stream = d.Stream
+	return text, w, true, false
 }
 
 // Flush returns a Docker partial line left over at the end of the source,
