@@ -33,6 +33,9 @@ pub enum Mode {
     Bench,
     /// Stream the spool to a collector on stdout (see `export`).
     Export { follow: bool },
+    /// Read this host's journal for the laptop (see `logs`). Carries the
+    /// arguments after `logs`, which that module parses itself.
+    Logs { args: Vec<String> },
 }
 
 #[derive(Clone, Debug)]
@@ -84,7 +87,8 @@ impl Default for Config {
 impl Config {
     /// Build a config from the environment, falling back to defaults.
     ///
-    /// Arguments pick the mode — `--once`, `--bench`, `export [--follow]` —
+    /// Arguments pick the mode — `--once`, `--bench`, `export [--follow]`,
+    /// `logs [...]` —
     /// since those are about this single invocation rather than about how the
     /// agent is deployed. `--spool <dir>` overrides the spool location for
     /// `export`, which runs without the unit's environment.
@@ -147,7 +151,11 @@ impl Config {
 
     fn apply_args(&mut self, args: &[String]) {
         let has = |flag: &str| args.iter().any(|arg| arg == flag);
-        self.mode = if args.first().is_some_and(|arg| arg == "export") {
+        self.mode = if args.first().is_some_and(|arg| arg == "logs") {
+            // Everything after `logs` belongs to it: `--follow` there is not
+            // export's `--follow`.
+            Mode::Logs { args: args[1..].to_vec() }
+        } else if args.first().is_some_and(|arg| arg == "export") {
             Mode::Export { follow: has("--follow") }
         } else if has("--bench") {
             Mode::Bench
@@ -218,6 +226,8 @@ mod tests {
         cfg.apply_args(&args(&["export", "--follow", "--spool", "/tmp/s"]));
         assert_eq!(cfg.mode, Mode::Export { follow: true });
         assert_eq!(cfg.spool_dir, PathBuf::from("/tmp/s"));
+        cfg.apply_args(&args(&["logs", "--follow", "--source", "web"]));
+        assert_eq!(cfg.mode, Mode::Logs { args: args(&["--follow", "--source", "web"]) });
     }
 
     #[test]

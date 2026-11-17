@@ -1,6 +1,6 @@
 //! Agent startup: load configuration, then do what this invocation is for —
-//! monitor into the spool, print one sample, benchmark, or export the spool
-//! to a collector.
+//! monitor into the spool, print one sample, benchmark, export the spool
+//! to a collector, or read the journal for the log viewer.
 
 use std::process;
 use std::thread;
@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::bench;
 use crate::config::{Config, Mode};
 use crate::export;
+use crate::logs;
 use crate::metrics::host::Identity;
 use crate::metrics::{Sampler, cpu};
 use crate::render;
@@ -28,6 +29,7 @@ pub fn run() {
         // costs this particular box, and what sample interval suits it.
         Mode::Bench => bench::run(&config),
         Mode::Export { follow } => export::run(&config.spool_dir, follow),
+        Mode::Logs { ref args } => logs::run(args),
         Mode::Once => once(&config),
         Mode::Monitor => monitor(&config),
     }

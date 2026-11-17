@@ -1,14 +1,15 @@
 #!/bin/sh
 #
 # Install or upgrade mini-bot on this host. Run as root, from a directory
-# holding the `mini-bot` binary and `mini-bot.service`:
+# holding the `mini-bot` binary, `mini-bot.service` and
+# `journald-vpsm.conf`:
 #
 #   sudo ./install.sh <host-id> [pull-user]
 #
 #   host-id    VPSM_HOST_ID: the name this host's data is filed under. Must be
 #              unique across your hosts and must never change.
-#   pull-user  The login the collector SSHes in as to run `mini-bot export`.
-#              Defaults to the user who ran sudo.
+#   pull-user  The login the laptop SSHes in as to run `mini-bot export` and
+#              `mini-bot logs`. Defaults to the user who ran sudo.
 #
 # Re-running is safe: it upgrades the binary and unit, and leaves an existing
 # /etc/vpsm/mini-bot.env and the spool alone.
@@ -17,6 +18,12 @@
 # /var/lib/vpsm; the pull user reads it and deletes what it has collected.
 # Both are in group `vpsm`, the directory is setgid so new files inherit the
 # group, and both ends run with umask 007. No sudo is involved in a pull.
+#
+# Logs: the pull user joins `systemd-journal`, which reads the journal and
+# nothing else, and journald gets a disk cap and persistent storage
+# (journald-vpsm.conf). Docker's log driver is NOT changed here: that needs a
+# Docker restart and recreated containers, so the script prints the steps
+# instead (see docker-daemon.json).
 
 set -eu
 
@@ -71,6 +78,12 @@ else
     echo "kept existing /etc/vpsm/mini-bot.env"
 fi
 
+# Logs live in journald; the pull user reads them through `mini-bot logs`.
+usermod -aG systemd-journal "$pull_user"
+install -d -m 0755 /etc/systemd/journald.conf.d
+install -m 0644 "$here/journald-vpsm.conf" /etc/systemd/journald.conf.d/vpsm.conf
+systemctl restart systemd-journald
+
 install -m 0644 "$here/mini-bot.service" /etc/systemd/system/mini-bot.service
 systemctl daemon-reload
 systemctl enable mini-bot >/dev/null 2>&1
@@ -81,4 +94,19 @@ systemctl --no-pager --lines=5 status mini-bot || true
 echo
 echo "installed. $pull_user can now be pulled from with:"
 echo "  vpsm-collector pull $pull_user@<this host>"
-echo "(a session already open as $pull_user must log in again to pick up the vpsm group)"
+echo "and its logs read with:"
+echo "  ssh $pull_user@<this host> mini-bot logs --since -1h | vpsm-logs"
+echo "(a session already open as $pull_user must log in again to pick up the new groups)"
+
+if command -v docker >/dev/null 2>&1; then
+    driver=$(docker info --format '{{.LoggingDriver}}' 2>/dev/null || true)
+    if [ "$driver" != "journald" ]; then
+        echo
+        echo "Docker logs to '${driver:-unknown}', not journald, so container logs won't reach mini-bot logs."
+        echo "When a brief restart of every container is acceptable:"
+        echo "  sudo cp $here/docker-daemon.json /etc/docker/daemon.json   # merge by hand if one exists"
+        echo "  sudo systemctl restart docker"
+        echo "  docker compose up -d --force-recreate                     # in each project"
+        echo "Only containers created after the restart use the new driver."
+    fi
+fi

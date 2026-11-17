@@ -1,9 +1,11 @@
 # mini-bot
 
-The VPSM monitoring agent. Deployed onto each VPS being watched; samples
-local system usage (CPU, memory, disk, network, and per-process usage) on an
-interval into an on-disk spool, which the collector pulls over SSH (see
-`../resources/collector/CLAUDE.md`).
+The VPSM agent, shared by both halves. Deployed onto each VPS being
+watched; samples local system usage (CPU, memory, disk, network, and
+per-process usage) on an interval into an on-disk spool, which the collector
+pulls over SSH (see `../resources/collector/CLAUDE.md`), and reads the
+host's journal for the log viewer on request (`mini-bot logs`, see
+`../logs/CLAUDE.md`).
 
 ## Why Rust
 
@@ -38,7 +40,11 @@ re-measures all of it on whatever box you run it on.
 - `src/spool.rs` — the on-disk backlog: append, rotate, thin, drop, ack.
 - `src/export.rs` — `mini-bot export [--follow]`, the command the collector
   runs over SSH to drain the spool.
-- `deploy/` — systemd unit and `install.sh`.
+- `src/logs.rs` — `mini-bot logs [...]`: runs `journalctl -o export` and
+  re-emits each entry as one compact JSON line for the log viewer. Export
+  format rather than journalctl's JSON, so no JSON parser is needed.
+- `deploy/` — systemd unit, `install.sh`, the journald drop-in, and the
+  Docker `daemon.json` that routes container logs to journald.
 
 ## Sampling approach
 
@@ -162,8 +168,8 @@ at 3 ms.
 
 ## Status
 
-Sampling, self-measurement, serialisation, the spool and `export` are built
-and covered by tests. The agent has no network code and should not grow
+Sampling, self-measurement, serialisation, the spool, `export` and `logs`
+are built and covered by tests. The agent has no network code and should not grow
 any: the collector pulls. The transport is described in
 `../resources/CLAUDE.md` and in `../resources/collector/internal/protocol/pull.go`, which is
 authoritative.
@@ -174,6 +180,7 @@ authoritative.
     mini-bot --once              print one sample and exit
     mini-bot --bench             measure the agent's own cost and exit
     mini-bot export [--follow]   stream the spool to a collector on stdout
+    mini-bot logs [...]          read the journal as JSON lines (../logs/CLAUDE.md)
 
 Configuration is environment variables (`VPSM_*`, see `config.rs`). The
 service reads them from `/etc/vpsm/mini-bot.env`. **`VPSM_HOST_ID` is
@@ -224,6 +231,15 @@ enforces:
 
 Not carried by v1: per-CPU breakdowns, per-block-device disk I/O, and
 `cached`/`buffers` memory. They stay in `Sample` for `--once`.
+
+## Logs
+
+`mini-bot logs` copies and stores nothing: journald is the log store, and
+the laptop resumes with journald's cursor. It runs as the SSH user, who
+needs only the `systemd-journal` group, and it runs `journalctl` as a
+child, which is the one place the agent spawns a process. That and the
+`HashMap` for rejoining Docker's partial lines cost about 57 KB of binary
+(518 KB to 575 KB); the sampling service never touches this code.
 
 ## Deploying
 

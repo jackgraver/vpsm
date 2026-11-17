@@ -16,6 +16,7 @@
 
 mod bench;
 mod export;
+mod logs;
 mod config;
 mod metrics;
 mod procfs;
