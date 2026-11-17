@@ -244,6 +244,12 @@ child, which is the one place the agent spawns a process. That and the
 ## Deploying
 
 Build a static binary (the Dockerfile's build stage produces one, musl), then
+copy it over with the `deploy/` files. A plain `cargo build --release` on the
+laptop links glibc dynamically and runs on the VPS only while its newest
+required symbol is no newer than the VPS's glibc: check with
+`objdump -T target/release/mini-bot | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1`
+against `ldd --version` there (Fedora 45 build vs Ubuntu 24.04: 2.39 vs 2.39,
+which works with no margin). Then
 on the host, from a directory holding `mini-bot`, `install.sh` and
 `mini-bot.service`:
 

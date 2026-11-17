@@ -24,8 +24,9 @@
 //! - `--since` takes anything journalctl does (`-2h`, `2026-11-16 10:00`).
 //! - With neither, the newest `--lines` entries (default 1000), so running
 //!   it by hand never dumps the whole journal.
-//! - `--source web` matches a container named `web`, the unit
-//!   `web.service`, or the syslog identifier `web`. Repeat to OR several.
+//! - `--source web` matches the compose service `web`, a container named
+//!   `web`, the unit `web.service`, or the syslog identifier `web`. Repeat
+//!   to OR several.
 //! - `--follow` keeps streaming new entries until stdin or stdout closes.
 //!
 //! # The line format
@@ -36,8 +37,9 @@
 //!
 //! - `cursor`: journald's, opaque; hand it back as `--after-cursor`.
 //! - `t`: microseconds since the Unix epoch, when journald received it.
-//! - `src`: the container name, else the systemd unit without `.service`,
-//!   else the syslog identifier, else the command name.
+//! - `src`: the compose service, else the container name, else the systemd
+//!   unit without `.service`, else the syslog identifier, else the command
+//!   name.
 //! - `stream`: `stdout`/`stderr`, for containers only.
 //! - `pri`: syslog priority 0 (emerg) .. 7 (debug), present only when the
 //!   program chose it. Output journald captured from a stream gets a fixed
@@ -55,6 +57,9 @@ use std::process::{self, Command, Stdio};
 
 use crate::wire;
 
+/// The journal field Docker writes the `com.docker.compose.service` label to.
+const COMPOSE_SERVICE: &str = "COM_DOCKER_COMPOSE_SERVICE";
+
 /// Entries returned when no starting point is given.
 const DEFAULT_LINES: u32 = 1000;
 
@@ -66,6 +71,10 @@ const FIELDS: &[&str] = &[
     "_TRANSPORT",
     "CONTAINER_NAME",
     "CONTAINER_PARTIAL_MESSAGE",
+    // Present when Docker's daemon.json lists the label in `log-opts.labels`
+    // (deploy/docker-daemon.json does): the compose service, `backend`
+    // rather than `simple-track-backend-1`.
+    COMPOSE_SERVICE,
     "_SYSTEMD_UNIT",
     "SYSLOG_IDENTIFIER",
     "_COMM",
@@ -131,6 +140,8 @@ impl Args {
                 a.push("+".into());
             }
             let base = name.strip_suffix(".service").unwrap_or(name);
+            a.push(format!("{COMPOSE_SERVICE}={base}"));
+            a.push("+".into());
             a.push(format!("CONTAINER_NAME={base}"));
             a.push("+".into());
             a.push(format!("_SYSTEMD_UNIT={base}.service"));
@@ -306,7 +317,9 @@ fn frame(f: &Fields, partial: &mut HashMap<String, String>) -> Option<String> {
 /// The name an entry is filed under: what an operator would call it.
 fn source(f: &Fields) -> String {
     let get = |k: &str| f.get(k).filter(|s| !s.is_empty());
-    if let Some(c) = get("CONTAINER_NAME") {
+    // Containers created before daemon.json listed the label lack it, and
+    // fall back to their full name.
+    if let Some(c) = get(COMPOSE_SERVICE).or_else(|| get("CONTAINER_NAME")) {
         return c.clone();
     }
     // Only a service unit names the program. A user session's unit
@@ -365,8 +378,10 @@ mod tests {
         assert_eq!(
             matches,
             vec![
-                "CONTAINER_NAME=web", "+", "_SYSTEMD_UNIT=web.service", "+", "SYSLOG_IDENTIFIER=web", "+",
-                "CONTAINER_NAME=caddy", "+", "_SYSTEMD_UNIT=caddy.service", "+", "SYSLOG_IDENTIFIER=caddy",
+                "COM_DOCKER_COMPOSE_SERVICE=web", "+", "CONTAINER_NAME=web", "+",
+                "_SYSTEMD_UNIT=web.service", "+", "SYSLOG_IDENTIFIER=web", "+",
+                "COM_DOCKER_COMPOSE_SERVICE=caddy", "+", "CONTAINER_NAME=caddy", "+",
+                "_SYSTEMD_UNIT=caddy.service", "+", "SYSLOG_IDENTIFIER=caddy",
             ]
         );
     }
@@ -421,6 +436,10 @@ __CURSOR=3\nCONTAINER_NAME=web\nPRIORITY=6\nMESSAGE=second\n\n";
     fn names_the_source_the_way_an_operator_would() {
         let f = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Fields>();
         assert_eq!(source(&f(&[("CONTAINER_NAME", "web"), ("_SYSTEMD_UNIT", "docker.service")])), "web");
+        assert_eq!(
+            source(&f(&[("CONTAINER_NAME", "simple-track-backend-1"), ("COM_DOCKER_COMPOSE_SERVICE", "backend")])),
+            "backend"
+        );
         assert_eq!(source(&f(&[("_SYSTEMD_UNIT", "caddy.service"), ("SYSLOG_IDENTIFIER", "caddy")])), "caddy");
         assert_eq!(source(&f(&[("_SYSTEMD_UNIT", "user@1000.service"), ("SYSLOG_IDENTIFIER", "discord")])), "discord");
         assert_eq!(source(&f(&[("_SYSTEMD_UNIT", "init.scope"), ("SYSLOG_IDENTIFIER", "systemd")])), "systemd");
