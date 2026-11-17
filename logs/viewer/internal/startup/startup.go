@@ -39,6 +39,7 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) error {
 	level := fs.String("level", "", "start with this minimum level: debug, info, warn, error")
 	print := fs.Bool("print", false, "print matching lines instead of opening the viewer (default when stdout is not a terminal)")
 	health := fs.Bool("health", false, "include health checks and local probes (hidden by default; h toggles them in the viewer)")
+	system := fs.Bool("system", false, "include the operating system's own lines from a VPS journal: kernel, logins, systemd, sshd (hidden by default; s toggles them in the viewer)")
 	host := fs.String("ssh", "", "read the logs of this host, by running `mini-bot logs` on it over ssh")
 	since := fs.String("since", "-1h", "with -ssh: how far back to start (anything journalctl --since takes)")
 	follow := fs.Bool("follow", true, "with -ssh: keep streaming new lines (in -print mode only when given)")
@@ -74,7 +75,7 @@ Flags:
 		return err
 	}
 
-	f := filter.Filter{Query: *query, ShowNoise: *health}
+	f := filter.Filter{Query: *query, ShowNoise: *health, ShowSystem: *system}
 	if *level != "" {
 		f.MinLevel = logline.ParseLevel(*level)
 		if f.MinLevel == logline.LevelUnknown {

@@ -78,6 +78,7 @@ type model struct {
 	stream *load.Stream // the live input, while there is one
 	live   bool         // still receiving
 	probes int          // entries marked as noise, for the header
+	system int          // entries marked as the OS's own, for the header
 
 	width, height int
 }
@@ -165,6 +166,9 @@ func (m *model) countProbes(from int) {
 	for i := from; i < len(m.set.Entries); i++ {
 		if m.set.Entries[i].Noise {
 			m.probes++
+		}
+		if m.set.Entries[i].System {
+			m.system++
 		}
 	}
 }
@@ -269,6 +273,9 @@ func (m *model) handleListKey(key string) tea.Cmd {
 		m.editing = true
 	case "h":
 		m.filter.ShowNoise = !m.filter.ShowNoise
+		m.refilter()
+	case "s":
+		m.filter.ShowSystem = !m.filter.ShowSystem
 		m.refilter()
 	case "l":
 		m.stepLevel(1)
@@ -432,8 +439,15 @@ func (m *model) viewHeader() string {
 	if len(m.visible) != len(m.set.Entries) {
 		right = fmt.Sprintf("%s of %s", commas(len(m.visible)), right)
 	}
+	var hidden []string
+	if m.system > 0 && !m.filter.ShowSystem {
+		hidden = append(hidden, commas(m.system)+" system")
+	}
 	if m.probes > 0 && !m.filter.ShowNoise {
-		right = styleDim.Render(fmt.Sprintf("%s health checks hidden  ", commas(m.probes))) + right
+		hidden = append(hidden, commas(m.probes)+" health")
+	}
+	if len(hidden) > 0 {
+		right = styleDim.Render("hidden: "+strings.Join(hidden, ", ")+"  ") + right
 	}
 	switch {
 	case m.live:
@@ -469,7 +483,7 @@ func (m *model) viewFooter() string {
 	case m.detail:
 		keys = "↑↓/pgup/pgdn scroll · esc back"
 	default:
-		keys = "↑↓/pgup/pgdn move · g/G top/bottom · / search · l/L level · h health checks · esc clear · enter detail · q quit"
+		keys = "↑↓/pgup/pgdn move · g/G top/bottom · / search · l/L level · s system · h health checks · esc clear · enter detail · q quit"
 	}
 	return truncateStyled(line, m.width) + "\n" + styleDim.Render(runewidth.Truncate(keys, m.width, "…"))
 }

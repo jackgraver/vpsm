@@ -26,6 +26,9 @@ type Filter struct {
 	// ShowNoise shows health checks and local probes, which are hidden by
 	// default (see logline.Entry.Noise).
 	ShowNoise bool
+	// ShowSystem shows the operating system's own lines, which are hidden
+	// by default (see logline.Entry.System).
+	ShowSystem bool
 }
 
 // CaseSensitive reports whether Query is matched exactly.
@@ -70,7 +73,7 @@ func (f Filter) contains(s string, sensitive bool) bool {
 }
 
 func (f Filter) match(e *logline.Entry, sensitive, sourceNamed bool) bool {
-	if e.Noise && !f.ShowNoise {
+	if e.Noise && !f.ShowNoise || e.System && !f.ShowSystem {
 		return false
 	}
 	if f.MinLevel != logline.LevelUnknown && e.Level < f.MinLevel {
