@@ -243,20 +243,40 @@ child, which is the one place the agent spawns a process. That and the
 
 ## Deploying
 
-Build a static binary (the Dockerfile's build stage produces one, musl), then
-copy it over with the `deploy/` files. A plain `cargo build --release` on the
-laptop links glibc dynamically and runs on the VPS only while its newest
-required symbol is no newer than the VPS's glibc: check with
-`objdump -T target/release/mini-bot | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1`
-against `ldd --version` there (Fedora 45 build vs Ubuntu 24.04: 2.39 vs 2.39,
-which works with no margin). Then
-on the host, from a directory holding `mini-bot`, `install.sh` and
-`mini-bot.service`:
+Releases go through j-cicd (`.cicd.yaml` here): `j-cicd run vpsm-mini-bot`
+tests, builds the static musl binary from the Dockerfile's `artifact` stage
+(`docker build --target artifact --output type=local,dest=dist .`), and
+sends it to `j-cicd-agent` on the VPS, which installs it at
+`/opt/vpsm/bin/mini-bot` (written beside the old one and renamed over it),
+restarts `mini-bot.service`, requires it to stay up on the same process for
+15s, and otherwise puts the previous binary back and restarts again.
+`j-cicd rollback vpsm-mini-bot` reverts the last release by hand. A plain
+`cargo build --release` on the laptop would link glibc dynamically and run
+on the VPS only while its newest required symbol is no newer than the
+VPS's glibc, which is why the build goes through the musl stage.
 
-    sudo ./install.sh <host-id> [pull-user]
+The one-time host setup is `install.sh`, as root, from a directory holding
+`mini-bot`, `install.sh`, `mini-bot.service` and `journald-vpsm.conf`:
+
+    sudo ./install.sh <host-id> [pull-user] [deploy-user]
 
 It is idempotent: it upgrades the binary and unit and keeps an existing
-`/etc/vpsm/mini-bot.env` and spool.
+`/etc/vpsm/mini-bot.env` and spool. The binary lives in `/opt/vpsm/bin`
+(`/usr/local/bin/mini-bot` is a symlink to it, for `ssh <host> mini-bot`).
+With a `deploy-user` (the login `j-cicd-agent` runs as), that directory
+belongs to it and `/etc/sudoers.d/vpsm-mini-bot` lets it run exactly
+`systemctl restart mini-bot.service` as root, so deploys need no other
+root access. That user can then choose what root runs here, so only give
+it to one that could already become root (sudo or docker group). Re-running
+without the argument keeps the existing deploy user. Changes to the unit
+file or `journald-vpsm.conf` still go through `install.sh`; deploys ship
+only the binary.
+
+The agent config entry on the VPS (`~/.config/j-cicd-agent.yaml`):
+
+    - name: mini-bot
+      files: [{name: mini-bot, path: /opt/vpsm/bin/mini-bot}]
+      systemd: {unit: mini-bot.service, settle: 15s}
 
 Note that an agent inside a container reads the *host's* `/proc/stat` and
 `/proc/meminfo` but only its own PID namespace, so host gauges and the

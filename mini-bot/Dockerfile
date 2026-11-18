@@ -22,6 +22,12 @@ COPY src ./src
 # the binary-size and RSS figures in CLAUDE.md are measured against it.
 RUN cargo build --release --locked
 
+# Just the static binary, for deploying it outside a container:
+#   docker build --target artifact --output type=local,dest=dist .
+# leaves dist/mini-bot (this is what .cicd.yaml's build step runs).
+FROM scratch AS artifact
+COPY --from=build /src/target/release/mini-bot /mini-bot
+
 FROM alpine:3.22
 
 COPY --from=build /src/target/release/mini-bot /usr/local/bin/mini-bot
