@@ -1,0 +1,25 @@
+# j-cicd pipeline for mini-bot: test, build the static (musl) binary, and
+# have j-cicd-agent on the VPS install it, restart the service, wait for it
+# to stay up, and put the previous binary back if it doesn't.
+#
+# Registered with: j-cicd add ~/Projects/vpsm/mini-bot
+# The VPS side (agent config, /opt/vpsm/bin, the sudoers rule for the
+# restart) is set up by deploy/install.sh with a deploy user; see
+# CLAUDE.md, "Deploying".
+name: vpsm-mini-bot
+branch: main
+steps:
+  - name: test
+    run: cargo test --locked
+  # The Dockerfile's build stage links musl statically. A plain
+  # `cargo build --release` here would link this machine's glibc, which runs
+  # on the VPS only while its glibc is at least as new.
+  - name: build
+    run: docker build --target artifact --output type=local,dest=dist .
+artifacts:
+  - name: mini-bot
+    path: dist/mini-bot
+deploy:
+  host: st-vps
+  command: J_CICD_AGENT_CONFIG=$HOME/.config/j-cicd-agent.yaml $HOME/.local/bin/j-cicd-agent
+  project: mini-bot

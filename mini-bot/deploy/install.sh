@@ -4,12 +4,14 @@
 # holding the `mini-bot` binary, `mini-bot.service` and
 # `journald-vpsm.conf`:
 #
-#   sudo ./install.sh <host-id> [pull-user]
+#   sudo ./install.sh <host-id> [pull-user] [deploy-user]
 #
-#   host-id    VPSM_HOST_ID: the name this host's data is filed under. Must be
-#              unique across your hosts and must never change.
-#   pull-user  The login the laptop SSHes in as to run `mini-bot export` and
-#              `mini-bot logs`. Defaults to the user who ran sudo.
+#   host-id      VPSM_HOST_ID: the name this host's data is filed under. Must
+#                be unique across your hosts and must never change.
+#   pull-user    The login the laptop SSHes in as to run `mini-bot export` and
+#                `mini-bot logs`. Defaults to the user who ran sudo.
+#   deploy-user  Optional: the login j-cicd-agent runs as, to let it upgrade
+#                mini-bot without root (see "Deploys" below).
 #
 # Re-running is safe: it upgrades the binary and unit, and leaves an existing
 # /etc/vpsm/mini-bot.env and the spool alone.
@@ -19,6 +21,17 @@
 # Both are in group `vpsm`, the directory is setgid so new files inherit the
 # group, and both ends run with umask 007. No sudo is involved in a pull.
 #
+# Binary: /opt/vpsm/bin/mini-bot, which the unit runs; /usr/local/bin/mini-bot
+# is a symlink to it so `ssh <host> mini-bot export` finds it on PATH.
+#
+# Deploys: with a deploy-user, /opt/vpsm/bin belongs to that user, so
+# j-cicd-agent (running as it) can replace the binary atomically, and a
+# sudoers rule lets it run exactly `systemctl restart mini-bot.service` and
+# nothing else as root. That makes the deploy user able to choose what root
+# runs here: give it to a user who could already become root (sudo or docker
+# group), not to a restricted one. Without a deploy-user the directory stays
+# root's and upgrades go through this script.
+#
 # Logs: the pull user joins `systemd-journal`, which reads the journal and
 # nothing else, and journald gets a disk cap and persistent storage
 # (journald-vpsm.conf). Docker's log driver is NOT changed here: that needs a
@@ -27,8 +40,9 @@
 
 set -eu
 
-host_id=${1:?usage: sudo ./install.sh <host-id> [pull-user]}
+host_id=${1:?usage: sudo ./install.sh <host-id> [pull-user] [deploy-user]}
 pull_user=${2:-${SUDO_USER:-}}
+deploy_user=${3:-}
 here=$(cd "$(dirname "$0")" && pwd)
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -40,8 +54,43 @@ if [ -z "$pull_user" ]; then
     exit 1
 fi
 id "$pull_user" >/dev/null
+# Re-running without a deploy-user keeps the one set up before, rather than
+# quietly taking the directory back and breaking deploys.
+if [ -z "$deploy_user" ] && [ -d /opt/vpsm/bin ]; then
+    owner=$(stat -c %U /opt/vpsm/bin)
+    if [ "$owner" != root ]; then
+        deploy_user=$owner
+        echo "keeping $deploy_user as the deploy user (owner of /opt/vpsm/bin)"
+    fi
+fi
+bin_owner=root
+if [ -n "$deploy_user" ]; then
+    id "$deploy_user" >/dev/null
+    bin_owner=$deploy_user
+fi
 
-install -m 0755 "$here/mini-bot" /usr/local/bin/mini-bot
+install -d -m 0755 /opt/vpsm
+install -d -m 0755 -o "$bin_owner" -g "$(id -gn "$bin_owner")" /opt/vpsm/bin
+# Written beside it and renamed over it, like the agent does, so the running
+# service never sees a half-written file.
+install -m 0755 -o "$bin_owner" "$here/mini-bot" /opt/vpsm/bin/.mini-bot.new
+mv -f /opt/vpsm/bin/.mini-bot.new /opt/vpsm/bin/mini-bot
+ln -sfn /opt/vpsm/bin/mini-bot /usr/local/bin/mini-bot
+
+sudoers=/etc/sudoers.d/vpsm-mini-bot
+if [ -n "$deploy_user" ]; then
+    systemctl_path=$(command -v systemctl)
+    tmp=$(mktemp)
+    printf '# Written by vpsm install.sh: lets j-cicd-agent restart mini-bot after a deploy.\n%s ALL=(root) NOPASSWD: %s restart mini-bot.service\n' \
+        "$deploy_user" "$systemctl_path" >"$tmp"
+    if visudo -cqf "$tmp"; then
+        install -m 0440 "$tmp" "$sudoers"
+        echo "wrote $sudoers ($deploy_user may restart mini-bot.service)"
+    else
+        echo "install.sh: generated sudoers rule failed visudo -c; not installed" >&2
+    fi
+    rm -f "$tmp"
+fi
 
 getent group vpsm >/dev/null || groupadd --system vpsm
 usermod -aG vpsm "$pull_user"
@@ -97,6 +146,13 @@ echo "  vpsm-collector pull $pull_user@<this host>"
 echo "and its logs read with:"
 echo "  ssh $pull_user@<this host> mini-bot logs --since -1h | vpsm-logs"
 echo "(a session already open as $pull_user must log in again to pick up the new groups)"
+if [ -n "$deploy_user" ]; then
+    echo
+    echo "j-cicd deploys: add to $deploy_user's j-cicd-agent config:"
+    echo "  - name: mini-bot"
+    echo "    files: [{name: mini-bot, path: /opt/vpsm/bin/mini-bot}]"
+    echo "    systemd: {unit: mini-bot.service, settle: 15s}"
+fi
 
 if command -v docker >/dev/null 2>&1; then
     driver=$(docker info --format '{{.LoggingDriver}}' 2>/dev/null || true)
