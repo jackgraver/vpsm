@@ -113,7 +113,7 @@ Environment:
   VPSM_AGENT_CMD  Command run on the agent host (default "%s")
 
 Run 'vpsm-collector <command> -h' for a command's flags.
-`, Version, config.DefaultAddr, config.DefaultDBPath, config.DefaultRetention, pull.DefaultAgentCommand)
+`, Version, config.DefaultAddr, config.DefaultDBPath(), config.DefaultRetention, pull.DefaultAgentCommand)
 }
 
 // serve runs the API server.

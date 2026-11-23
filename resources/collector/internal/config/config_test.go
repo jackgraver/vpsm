@@ -23,8 +23,8 @@ func TestLoadDefaults(t *testing.T) {
 	if !strings.HasPrefix(cfg.Addr, "127.0.0.1:") {
 		t.Errorf("default Addr = %q, want a loopback address", cfg.Addr)
 	}
-	if cfg.DBPath != DefaultDBPath {
-		t.Errorf("DBPath = %q, want %q", cfg.DBPath, DefaultDBPath)
+	if cfg.DBPath != DefaultDBPath() {
+		t.Errorf("DBPath = %q, want %q", cfg.DBPath, DefaultDBPath())
 	}
 	if cfg.Retention != DefaultRetention {
 		t.Errorf("Retention = %s, want %s", cfg.Retention, DefaultRetention)
@@ -115,5 +115,18 @@ func TestZeroRetentionIsAllowed(t *testing.T) {
 	cfg := Config{Addr: "a", DBPath: "b", Token: "x", Retention: 0, PruneInterval: time.Hour}
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("Validate: %v", err)
+	}
+}
+
+func TestDefaultDBPathIsNotRelativeToCwd(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", "/data")
+	if got, want := DefaultDBPath(), "/data/vpsm/vpsm.db"; got != want {
+		t.Errorf("DefaultDBPath = %q, want %q", got, want)
+	}
+
+	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("HOME", "/home/u")
+	if got, want := DefaultDBPath(), "/home/u/.local/share/vpsm/vpsm.db"; got != want {
+		t.Errorf("DefaultDBPath = %q, want %q", got, want)
 	}
 }

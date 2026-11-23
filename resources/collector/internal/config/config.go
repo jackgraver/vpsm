@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -13,11 +14,27 @@ import (
 // Defaults for every setting.
 const (
 	DefaultAddr          = "127.0.0.1:8777"
-	DefaultDBPath        = "vpsm.db"
 	DefaultRetention     = 14 * 24 * time.Hour
 	DefaultPruneInterval = time.Hour
 	DefaultHistory       = 30
 )
+
+// DefaultDBPath is where the database lives when neither -db nor VPSM_DB
+// says otherwise: $XDG_DATA_HOME/vpsm/vpsm.db, or ~/.local/share/vpsm/vpsm.db.
+//
+// It is deliberately not relative to the working directory. A pull acks
+// what it stores, and the agent then deletes it, so a pull that quietly
+// wrote to a stray ./vpsm.db in whatever directory the command ran from
+// would lose that history from the real database for good.
+func DefaultDBPath() string {
+	if d := os.Getenv("XDG_DATA_HOME"); d != "" && filepath.IsAbs(d) {
+		return filepath.Join(d, "vpsm", "vpsm.db")
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".local", "share", "vpsm", "vpsm.db")
+	}
+	return "vpsm.db" // no home directory at all: nothing better to offer
+}
 
 // Config is everything the collector needs to run.
 type Config struct {
@@ -64,7 +81,7 @@ type Config struct {
 func Load() (Config, error) {
 	c := Config{
 		Addr:          env("VPSM_ADDR", DefaultAddr),
-		DBPath:        env("VPSM_DB", DefaultDBPath),
+		DBPath:        env("VPSM_DB", DefaultDBPath()),
 		Token:         os.Getenv("VPSM_TOKEN"),
 		Retention:     DefaultRetention,
 		PruneInterval: DefaultPruneInterval,
