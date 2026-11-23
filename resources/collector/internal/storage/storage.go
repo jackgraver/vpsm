@@ -260,7 +260,7 @@ func dsn(path string) (string, error) {
 	}
 	// The default location lives in a per-user data directory that may not
 	// exist yet.
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
 		return "", fmt.Errorf("create database directory: %w", err)
 	}
 	return "file:" + abs + "?" + pragmas, nil
