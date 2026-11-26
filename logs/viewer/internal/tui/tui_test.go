@@ -286,7 +286,7 @@ func TestHealthChecksToggle(t *testing.T) {
 		`[GIN] | 200 | 1ms | 127.0.0.1 | GET "/health"`,
 		`[GIN] | 200 | 9ms | 172.18.0.1 | GET "/money/accounts"`,
 		`[GIN] | 200 | 1ms | 127.0.0.1 | GET "/health"`)
-	if len(m.visible) != 1 || !strings.Contains(m.View(), "2 health checks hidden") {
+	if len(m.visible) != 1 || !strings.Contains(m.View(), "hidden: 2 health") {
 		t.Fatalf("visible = %d, want probes hidden by default:\n%s", len(m.visible), m.View())
 	}
 	press(m, "h")
@@ -296,5 +296,20 @@ func TestHealthChecksToggle(t *testing.T) {
 	press(m, "h")
 	if len(m.visible) != 1 {
 		t.Errorf("h again should hide them: visible = %d", len(m.visible))
+	}
+}
+
+func TestSystemLinesToggle(t *testing.T) {
+	m, ch := newLiveModel(t)
+	deliver(m, ch,
+		`{"cursor":"1","src":"sshd","sys":true,"msg":"Accepted publickey for jack"}`,
+		`{"cursor":"2","src":"backend","msg":"INFO request"}`,
+		`{"cursor":"3","src":"kernel","sys":true,"msg":"[UFW BLOCK] IN=eth0"}`)
+	if len(m.visible) != 1 || !strings.Contains(m.View(), "hidden: 2 system") {
+		t.Fatalf("visible = %d, want system lines hidden by default:\n%s", len(m.visible), m.View())
+	}
+	press(m, "s")
+	if len(m.visible) != 3 {
+		t.Errorf("s should show them: visible = %d", len(m.visible))
 	}
 }

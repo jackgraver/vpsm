@@ -53,6 +53,10 @@ type Entry struct {
 	// Continuation marks a line whose level and time were inherited from
 	// the line before it.
 	Continuation bool
+	// System marks the operating system's own lines (kernel, logins,
+	// systemd, sshd...), as `mini-bot logs` flags them. Hidden unless asked
+	// for: on a quiet VPS they are most of the journal.
+	System bool
 	// Noise marks a health check or local probe: a request to /health and
 	// friends, or a GET from the container's own loopback. Hidden unless
 	// asked for, since a service probed every 10s drowns its real traffic.
@@ -89,6 +93,7 @@ type wrapper struct {
 	stamp    time.Time
 	stream   string
 	origin   string
+	system   bool
 	priority Level // LevelUnknown unless the program set one
 }
 
@@ -106,7 +111,7 @@ func (p *Parser) Next(raw string) (Entry, bool) {
 	}
 
 	text = Clean(text)
-	e := Entry{Source: p.Source, Line: p.line, Text: text, Stream: w.stream, Origin: w.origin, Noise: IsProbe(text)}
+	e := Entry{Source: p.Source, Line: p.line, Text: text, Stream: w.stream, Origin: w.origin, System: w.system, Noise: IsProbe(text)}
 	e.Level, e.Time = p.detect(text)
 	ownTime := !e.Time.IsZero()
 
@@ -144,6 +149,7 @@ type journalLine struct {
 	Src    string  `json:"src"`
 	Stream string  `json:"stream"`
 	Pri    *int    `json:"pri"`
+	Sys    bool    `json:"sys"`
 	Msg    string  `json:"msg"`
 }
 
@@ -155,7 +161,7 @@ func (p *Parser) unwrapJournal(raw string) (string, wrapper, bool) {
 	if err := json.Unmarshal([]byte(raw), &j); err != nil || j.Cursor == nil {
 		return raw, wrapper{}, false
 	}
-	w := wrapper{stream: j.Stream, origin: j.Src}
+	w := wrapper{stream: j.Stream, origin: j.Src, system: j.Sys}
 	if j.T > 0 {
 		w.stamp = time.UnixMicro(j.T)
 	}

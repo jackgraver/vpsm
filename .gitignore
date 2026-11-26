@@ -1,9 +1,11 @@
 # mini-bot (Rust)
 /mini-bot/target
+/mini-bot/dist
 
 # collector (Go)
 /resources/collector/collector
 /resources/collector/vpsm-collector
+/resources/collector/dist
 
 # collector runtime state (SQLite, plus its WAL sidecar files)
 vpsm.db
@@ -12,3 +14,4 @@ vpsm.db-wal
 
 # logs viewer (Go)
 /logs/viewer/vpsm-logs
+/logs/viewer/dist

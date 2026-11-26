@@ -71,6 +71,7 @@ One JSON object per line. Written by `../mini-bot/src/logs.rs`, read by
 | `src` | compose service, else container name, else systemd service without `.service`, else syslog identifier, else command |
 | `stream` | `stdout`/`stderr`, containers only |
 | `pri` | syslog priority 0–7, **only when the program chose it** |
+| `sys` | `true` on the operating system's own lines, absent otherwise |
 | `msg` | the message; Docker's 16 KiB partial lines rejoined |
 
 `pri` is left out for output journald captured from a stream, because that
@@ -97,8 +98,8 @@ vpsm-logs [-q search] [-level warn] [-print] [path ...]
 - When stdout is not a terminal (or with `-print`) the matching lines are
   printed instead, so the same flags work in a pipeline.
 
-Keys: `/` search (live, as you type), `l`/`L` step the minimum level, `h`
-show/hide health checks, `esc` removes the search and then the level,
+Keys: `/` search (live, as you type), `l`/`L` step the minimum level, `s`
+show/hide system lines, `h` show/hide health checks, `esc` removes the search and then the level,
 `enter` shows one line in full (JSON pretty-printed), `g`/`G` top/bottom,
 `q` quit.
 
@@ -151,6 +152,16 @@ stays put once you scroll up. The header says `● live`, then `ended`.
   ignores case, any uppercase makes it exact. Not a regex, on purpose, for
   v1. **It also matches the source name**, so `backend` finds everything the
   backend logged, which rarely says "backend" in its own text.
+- **The operating system's lines are hidden by default** (`s`, or
+  `-system`). Measured on st-vps over an hour: 3,660 lines, of which 127
+  were the apps (frontend, backend, Caddy). The rest was systemd (each SSH
+  login starts a user session, ~25 lines), firewall blocks from the
+  kernel, sshd/logind, the Docker daemon and containerd. mini-bot marks
+  them `sys`, since only the journal knows a line's transport and unit:
+  the kernel, login sessions and the per-user systemd, and a fixed list
+  of OS programs (`SYSTEM_PROGRAMS` in `mini-bot/src/logs.rs`, plus any
+  `systemd-*`). Everything else — containers, Caddy, anything installed
+  later — is the host's own and shown without configuring anything.
 - **Health checks are hidden by default** (`h`, or `-health`). A container
   probed every 10s buries its real traffic. A probe is a request to
   `/health`, `/healthz`, `/ready`, `/livez`, `/ping` and similar, or a GET

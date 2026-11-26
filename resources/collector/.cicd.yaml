@@ -1,0 +1,22 @@
+# j-cicd pipeline for the collector: check, test, build, and install into
+# ~/.local/bin through the local j-cicd-agent (atomic replace, `version`
+# must run, the previous binary kept for `j-cicd rollback vpsm-collector`).
+#
+# Registered with: j-cicd add ~/Projects/vpsm/resources/collector
+name: vpsm-collector
+branch: main
+steps:
+  - name: fmt
+    run: 'out=$(gofmt -l .); [ -z "$out" ] || { echo "not gofmt-formatted:"; echo "$out"; exit 1; }'
+  - name: vet
+    run: go vet ./...
+  - name: test
+    run: go test ./...
+  - name: build
+    run: CGO_ENABLED=0 go build -trimpath -o dist/vpsm-collector .
+artifacts:
+  - name: vpsm-collector
+    path: dist/vpsm-collector
+deploy:
+  local: true
+  command: J_CICD_AGENT_CONFIG=$HOME/.config/j-cicd-agent.yaml j-cicd-agent

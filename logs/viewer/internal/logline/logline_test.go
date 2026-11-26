@@ -301,3 +301,12 @@ func TestGinRequestLines(t *testing.T) {
 		t.Errorf("time = %v, want %v", e.Time, want)
 	}
 }
+
+func TestJournalSystemFlag(t *testing.T) {
+	if e := parseOne(t, `{"cursor":"1","src":"kernel","sys":true,"msg":"x"}`); !e.System {
+		t.Error("sys:true should mark the entry as System")
+	}
+	if e := parseOne(t, `{"cursor":"1","src":"backend","msg":"x"}`); e.System {
+		t.Error("no sys means not System")
+	}
+}

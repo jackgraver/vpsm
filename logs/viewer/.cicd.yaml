@@ -1,0 +1,22 @@
+# j-cicd pipeline for the log viewer: check, test, build, and install into
+# ~/.local/bin through the local j-cicd-agent (atomic replace, `-h` must
+# run, the previous binary kept for `j-cicd rollback vpsm-logs`).
+#
+# Registered with: j-cicd add ~/Projects/vpsm/logs/viewer
+name: vpsm-logs
+branch: main
+steps:
+  - name: fmt
+    run: 'out=$(gofmt -l .); [ -z "$out" ] || { echo "not gofmt-formatted:"; echo "$out"; exit 1; }'
+  - name: vet
+    run: go vet ./...
+  - name: test
+    run: go test ./...
+  - name: build
+    run: CGO_ENABLED=0 go build -trimpath -o dist/vpsm-logs .
+artifacts:
+  - name: vpsm-logs
+    path: dist/vpsm-logs
+deploy:
+  local: true
+  command: J_CICD_AGENT_CONFIG=$HOME/.config/j-cicd-agent.yaml j-cicd-agent

@@ -15,6 +15,7 @@ package storage
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -256,6 +257,11 @@ func dsn(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", fmt.Errorf("resolve %s: %w", path, err)
+	}
+	// The default location lives in a per-user data directory that may not
+	// exist yet.
+	if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
+		return "", fmt.Errorf("create database directory: %w", err)
 	}
 	return "file:" + abs + "?" + pragmas, nil
 }

@@ -46,6 +46,9 @@
 //!   priority by stream, not by content — Docker marks every stderr line 3
 //!   ("error") — so for those it is left out rather than mislead, and the
 //!   level comes from the text.
+//! - `sys`: `true` on the operating system's own lines (kernel, logins,
+//!   systemd, sshd, cron, the Docker daemon...; see [`is_system`]), absent
+//!   otherwise. The viewer hides them until asked.
 //! - `msg`: the message. Docker's 16 KiB partial lines are rejoined.
 //!
 //! The authoritative description is `logs/CLAUDE.md`; the reader is
@@ -308,10 +311,47 @@ fn frame(f: &Fields, partial: &mut HashMap<String, String>) -> Option<String> {
         out.push_str(",\"pri\":");
         out.push_str(&p.to_string());
     }
+    if container.is_none() && is_system(f, &src) {
+        out.push_str(",\"sys\":true");
+    }
     out.push_str(",\"msg\":");
     wire::string(&mut out, &msg);
     out.push('}');
     Some(out)
+}
+
+/// Programs that are the operating system rather than what the host is
+/// for. Matched against the entry's source name; anything `systemd-*` is
+/// included without listing.
+const SYSTEM_PROGRAMS: &[&str] = &[
+    "kernel", "systemd", "(systemd)", "(sd-pam)", "init",
+    "sshd", "ssh", "sudo", "su", "login", "agetty", "polkitd", "dbus", "dbus-daemon",
+    "cron", "CRON", "anacron", "atd",
+    "dockerd", "docker", "containerd",
+    "snapd", "rsyslogd", "auditd", "audit", "multipathd", "ModemManager", "udisksd",
+    "networkd-dispatcher", "NetworkManager", "chronyd", "ntpd", "cloud-init",
+    "unattended-upgrade", "unattended-upgrades", "packagekitd", "apt", "dpkg", "fwupd",
+    "useradd", "usermod", "userdel", "groupadd", "groupmod", "passwd", "chpasswd",
+    "update-notifier-motd", "motd", "mini-bot",
+];
+
+/// Whether a (non-container) entry is the operating system talking: the
+/// kernel, a login session or the per-user systemd it starts, or one of
+/// [`SYSTEM_PROGRAMS`]. Every other service — Caddy, a database run as a
+/// unit, anything installed later — counts as the host's own, so nothing
+/// needs listing to be shown. The viewer hides `sys` lines until asked:
+/// on a quiet VPS they are about 90% of the journal, mostly SSH logins,
+/// each of which adds ~25 lines, and firewall blocks.
+fn is_system(f: &Fields, src: &str) -> bool {
+    if f.get("_TRANSPORT").is_some_and(|t| t == "kernel") {
+        return true;
+    }
+    if let Some(unit) = f.get("_SYSTEMD_UNIT")
+        && (unit.starts_with("user@") || unit.starts_with("session-") || unit == "init.scope")
+    {
+        return true;
+    }
+    src.starts_with("systemd-") || SYSTEM_PROGRAMS.contains(&src)
 }
 
 /// The name an entry is filed under: what an operator would call it.
@@ -403,7 +443,7 @@ __CURSOR=b\n_SYSTEMD_UNIT=sshd.service\nPRIORITY=4\n_TRANSPORT=syslog\nMESSAGE=y
             convert_str(input),
             vec![
                 r#"{"cursor":"a","src":"caddy","msg":"x"}"#,
-                r#"{"cursor":"b","src":"sshd","pri":4,"msg":"y"}"#,
+                r#"{"cursor":"b","src":"sshd","pri":4,"sys":true,"msg":"y"}"#,
             ]
         );
     }
@@ -445,6 +485,21 @@ __CURSOR=3\nCONTAINER_NAME=web\nPRIORITY=6\nMESSAGE=second\n\n";
         assert_eq!(source(&f(&[("_SYSTEMD_UNIT", "init.scope"), ("SYSLOG_IDENTIFIER", "systemd")])), "systemd");
         assert_eq!(source(&f(&[("_COMM", "kthreadd")])), "kthreadd");
         assert_eq!(source(&f(&[])), "journal");
+    }
+
+    #[test]
+    fn marks_the_operating_systems_own_lines() {
+        let input = b"__CURSOR=k\n_TRANSPORT=kernel\nSYSLOG_IDENTIFIER=kernel\nMESSAGE=[UFW BLOCK] IN=eth0\n\n\
+__CURSOR=l\n_SYSTEMD_UNIT=systemd-logind.service\nMESSAGE=New session 3175 of user jack.\n\n\
+__CURSOR=u\n_SYSTEMD_UNIT=user@1000.service\nSYSLOG_IDENTIFIER=systemd\nMESSAGE=Listening on dbus.socket\n\n\
+__CURSOR=s\n_SYSTEMD_UNIT=session-3175.scope\nSYSLOG_IDENTIFIER=sshd\nMESSAGE=pam_unix(sshd:session): opened\n\n\
+__CURSOR=d\n_SYSTEMD_UNIT=docker.service\nSYSLOG_IDENTIFIER=dockerd\nMESSAGE=healthcheck failed\n\n\
+__CURSOR=c\n_SYSTEMD_UNIT=caddy.service\nSYSLOG_IDENTIFIER=caddy\nMESSAGE=served\n\n\
+__CURSOR=w\n_SYSTEMD_UNIT=docker.service\nCONTAINER_NAME=web\nPRIORITY=6\nMESSAGE=hello\n\n";
+        let sys: Vec<bool> = convert_str(input).iter().map(|l| l.contains(r#""sys":true"#)).collect();
+        // kernel, logind, user systemd, session sshd, dockerd: system.
+        // caddy, and a container even though its unit is docker.service: not.
+        assert_eq!(sys, vec![true, true, true, true, true, false, false]);
     }
 
     #[test]

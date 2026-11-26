@@ -14,7 +14,8 @@ After=local-fs.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mini-bot
+# Not /usr/local/bin/mini-bot (a symlink to this, for PATH): see install.sh.
+ExecStart=/opt/vpsm/bin/mini-bot
 EnvironmentFile=/etc/vpsm/mini-bot.env
 Restart=on-failure
 RestartSec=10
